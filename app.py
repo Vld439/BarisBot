@@ -1,46 +1,126 @@
 import streamlit as st
-import google.generativeai as genai
+from groq import Groq
+import chromadb
+from chromadb.utils import embedding_functions
+import pandas as pd
 import os
 
-st.set_page_config(page_title="Diagnóstico BarisBot", page_icon="🩺")
+# --- CONFIGURACION ---
+st.set_page_config(page_title="Soporte Baris", layout="centered", page_icon="🤖")
 
-st.title("🩺 Diagnóstico de Conexión")
+hide_streamlit_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-# 1. VERIFICACIÓN DE CLAVE (Sin mostrarla completa por seguridad)
+# --- CONEXIÓN GROQ (NUEVO CEREBRO) ---
 try:
-    api_key = st.secrets["GOOGLE_API_KEY"]
-    # Mostramos los primeros y últimos 4 caracteres para que VERIFIQUES si es la nueva
-    clave_visible = f"{api_key[:4]}...{api_key[-4:]}"
-    st.info(f"🔑 Clave detectada: {clave_visible}")
+    api_key = st.secrets["GROQ_API_KEY"]
+    client = Groq(api_key=api_key)
 except:
-    st.error(" No se detectó ninguna API Key en los Secrets.")
+    st.error("Error: Falta la GROQ_API_KEY en los secrets.")
     st.stop()
 
-# 2. CONFIGURACIÓN
-genai.configure(api_key=api_key)
+# --- CARGA DE DATOS ---
+@st.cache_data
+def load_data():
+    path = "base_conocimiento_HIBRIDA.csv"
+    if os.path.exists(path):
+        return pd.read_csv(path).fillna("")
+    return None
 
-# 3. PRUEBA DE FUEGO
-# Usamos el modelo más estándar y estable del mundo.
-# Si este falla, el problema es 100% la cuenta/clave.
-nombre_modelo = "gemini-2.0-flash-lite-001" 
+df = load_data()
 
-st.write(f" Intentando conectar con: `{nombre_modelo}`...")
+# --- BASE DE DATOS VECTORIAL ---
+@st.cache_resource
+def get_vector_store():
+    try:
+        if not os.path.exists("./cerebro_baris_db"):
+            os.makedirs("./cerebro_baris_db")
+        
+        db_client = chromadb.PersistentClient(path="./cerebro_baris_db")
+        emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="paraphrase-multilingual-MiniLM-L12-v2")
+        return db_client.get_or_create_collection(name="manual_baris", embedding_function=emb_fn)
+    except Exception as e:
+        return None
 
-try:
-    model = genai.GenerativeModel(nombre_modelo)
-    response = model.generate_content("Responde solo con la palabra: ¡CONECTADO!")
-    
-    st.success(f" ÉXITO: {response.text}")
-    st.balloons()
-    
-except Exception as e:
-    # AQUI ES DONDE VEREMOS LA VERDAD
-    st.error(" ERROR FATAL DE GOOGLE:")
-    st.code(str(e)) # Muestra el error técnico crudo
-    
-    st.markdown("""
-    **Guía de Errores Comunes:**
-    * **403 / API key not valid:** La clave en secrets está mal escrita o es la vieja.
-    * **429 / Quota exceeded:** Estás usando la cuenta vieja o la nueva no tiene facturación habilitada (aunque sea gratis, a veces pide verificar tarjeta).
-    * **404 / Not Found:** El nombre del modelo está mal (raro con 1.5-flash).
-    """)
+collection = get_vector_store()
+
+# --- BUSQUEDA POR PUNTOS ---
+def buscar_por_puntos(query, dataframe):
+    if dataframe is None: return []
+    palabras = query.lower().split()
+    resultados = []
+    for index, row in dataframe.iterrows():
+        puntos = 0
+        texto = str(row['Pregunta_Hibrida']).lower()
+        for p in palabras:
+            if p in texto: puntos += 1
+        if puntos > 0:
+            resultados.append(row.to_dict())
+    return sorted(resultados, key=lambda x: 1, reverse=True)[:3]
+
+# --- INTERFAZ ---
+st.title("🤖 Soporte Baris (Motor Llama-3)")
+
+query = st.text_input("Describa el problema:")
+
+if st.button("Buscar Solución", type="primary"):
+    if not query:
+        st.warning("Escribe algo primero.")
+    else:
+        with st.spinner("Consultando a Llama-3..."):
+            # 1. Recuperar contexto
+            contexto_texto = ""
+            fuentes = buscar_por_puntos(query, df)
+            
+            # Si no hay resultados por palabras, intentar vector (opcional)
+            if not fuentes and collection:
+                try:
+                    res = collection.query(query_texts=[query], n_results=2)
+                    if res['metadatas'][0]:
+                        for meta in res['metadatas'][0]:
+                            contexto_texto += f"- {meta['pregunta']}: {meta['respuesta']}\n"
+                except:
+                    pass
+
+            for f in fuentes:
+                contexto_texto += f"PREGUNTA: {f['Pregunta_Hibrida']}\nSOLUCIÓN: {f['Respuesta']}\nVIDEO: {f['Video']}\n---\n"
+            
+            # 2. Prompt para Groq
+            prompt_sistema = """
+            Eres un experto en soporte técnico de JHF Ingeniería.
+            Tu trabajo es leer la INFORMACIÓN TÉCNICA provista y responder la duda del usuario.
+            - Sé directo y profesional.
+            - Si la información incluye un link de video, dámelo.
+            - Si la información NO está en el texto provisto, di: "No tengo información sobre eso en mis manuales actuales."
+            """
+
+            mensaje_usuario = f"""
+            INFORMACIÓN TÉCNICA:
+            {contexto_texto}
+            
+            CONSULTA DEL USUARIO:
+            {query}
+            """
+            
+            try:
+                # LLAMADA A LA API DE GROQ
+                chat_completion = client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": prompt_sistema},
+                        {"role": "user", "content": mensaje_usuario}
+                    ],
+                    model="llama3-70b-8192", # Modelo muy potente y rápido
+                    temperature=0.2, # Baja temperatura para ser preciso
+                )
+                
+                respuesta = chat_completion.choices[0].message.content
+                st.markdown("### Solución:")
+                st.write(respuesta)
+                
+            except Exception as e:
+                st.error(f"Error conectando con Groq: {e}")
