@@ -1,122 +1,135 @@
 import streamlit as st
-import pandas as pd
 import google.generativeai as genai
+import chromadb
+from chromadb.utils import embedding_functions
+import pandas as pd
+import os
 
-# --- 1. CONFIGURACIÓN ---
+# --- CONFIGURACION ---
+st.set_page_config(page_title="Soporte Baris", layout="centered", page_icon="🤖")
+
+# Ocultar menu de hamburguesa y footer de Streamlit para que se vea mas profesional
+hide_streamlit_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 try:
     api_key = st.secrets["GOOGLE_API_KEY"]
 except:
-    st.error("⚠️ No se encontró el archivo .streamlit/secrets.toml")
+    st.error("Error: Falta el archivo secrets.toml")
     st.stop()
 
 genai.configure(api_key=api_key)
 
-# --- 2. CARGAR DATOS ---
+# --- CARGA DE DATOS ---
 @st.cache_data
 def load_data():
-    try:
-    
-        df = pd.read_csv("base_conocimiento_baris_limpia.csv", encoding="utf-8")
-        df = df.fillna("")
-        return df
-    except:
-        return None
+    path = "base_conocimiento_HIBRIDA.csv"
+    if os.path.exists(path):
+        return pd.read_csv(path).fillna("")
+    return None
 
 df = load_data()
 
-if df is None:
-    st.error("❌ Falta el archivo 'base_conocimiento_baris_limpia.csv'")
-    st.stop()
+@st.cache_resource
+def get_vector_store():
+    try:
+        client = chromadb.PersistentClient(path="./cerebro_baris_db")
+        emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="paraphrase-multilingual-MiniLM-L12-v2")
+        return client.get_collection(name="manual_baris", embedding_function=emb_fn)
+    except:
+        return None
 
-# --- 3. MOTOR DE BÚSQUEDA ---
-def buscar_contexto(query, dataframe, top_k=8):
-    """
-    Buscamos las 8 filas más parecidas. 
-    para que la IA tenga margen de eleccion
-    """
-    query = query.lower()
-    palabras = query.split()
+collection = get_vector_store()
+model = genai.GenerativeModel("gemini-flash-latest")
+
+# --- MOTOR DE PUNTUACION ---
+def buscar_por_puntos(query, dataframe):
+    if dataframe is None: return []
+    palabras_usuario = query.lower().split()
+    palabras_clave = [p for p in palabras_usuario if p not in ["una", "el", "la", "de", "para", "en", "como", "quiero", "que"]]
     
-    def score(row):
-        txt = (str(row['Pregunta']) + " " + str(row['Respuesta'])).lower()
-        return sum(1 for p in palabras if p in txt)
+    if not palabras_clave: return []
 
-    temp = dataframe.copy()
-    temp['score'] = temp.apply(score, axis=1)
-    return temp[temp['score'] > 0].sort_values('score', ascending=False).head(top_k)
+    resultados = []
+    for index, row in dataframe.iterrows():
+        texto_fila = str(row['Pregunta_Hibrida']).lower()
+        puntos = 0
+        for palabra in palabras_clave:
+            if palabra in texto_fila:
+                puntos += 1
+                if palabra in ["echar", "atras", "revertir", "cancelar", "trabada", "lento", "error", "no sale"]:
+                    puntos += 2 # Bonificacion por palabras urgentes
 
-# --- 4. CEREBRO INTELIGENTE ---
-# Instrucciones de Discernimiento para que no mezcle temas.
-model = genai.GenerativeModel(
-    model_name="models/gemini-flash-latest", 
-    system_instruction="""
-    Eres el Asistente Experto de Baris. Recibirás una lista de posibles respuestas del manual (Contexto).
-    Tu trabajo es SELECCIONAR la mejor opción para la pregunta del usuario.
-
-    REGLAS DE SELECCIÓN (CRÍTICO):
-    1. **Distingue la Intención:**
-       - Si el usuario pregunta "Cómo hacer X" (Proceso), DALE los pasos operativos. IGNORA soluciones de errores técnicos (Regedit, errores 0x...).
-       - Solo da soluciones técnicas complejas si el usuario pregunta explícitamente por un "Error" o "Fallo".
+        if puntos > 0:
+            resultados.append({
+                "puntos": puntos,
+                "pregunta": row['Pregunta_Hibrida'],
+                "respuesta": row['Respuesta'],
+                "video": row['Video']
+            })
     
-    2. **Fidelidad:**
-       - Copia los pasos numerados EXACTAMENTE como están en el texto seleccionado.
-       - No resumas ni cambies las palabras técnicas.
+    resultados = sorted(resultados, key=lambda x: x['puntos'], reverse=True)
+    return resultados[:3]
 
-    3. **Video:**
-       - Si la fila seleccionada tiene un link en la columna 'Video', ponlo al final.
-       - Si la columna 'Video' está vacía, NO inventes links.
+# --- INTERFAZ GRAFICA ---
+st.title(" Asistente Técnico Baris")
+st.markdown("Escribe tu consulta abajo y te ayudaré paso a paso.")
 
-    4. **Honestidad:**
-       - Si ninguna de las opciones en el contexto responde realmente a la pregunta, di: "No tengo esa información en el manual".
-    """
-)
+query = st.text_input("¿En qué puedo ayudarte hoy?", placeholder="Ej: No imprime la factura, quiero anular una venta...")
 
-# --- 5. INTERFAZ ---
-st.title("Soporte Baris")
-st.caption("Sistema de soporte de información del Baris")
-
-query = st.text_input("Pregunta del funcionario:", placeholder="Ej: Registrar funcionario...")
-
-if st.button("Buscar") or query:
-    if query:
-        with st.spinner("Analizando manual..."):
-            # 1. Python busca candidatos
-            resultados = buscar_contexto(query, df)
+if st.button("Buscar Solución", type="primary"):
+    if not query:
+        st.warning("Por favor escribe una consulta.")
+    else:
+        with st.spinner("Analizando manual técnico..."):
+            fuentes = []
             
-            if resultados.empty:
-                st.warning("No encontré coincidencias con esas palabras.")
-            else:
-                # 2. Preparamos el contexto de forma clara para que la IA elija
-                # Formato: ID - Pregunta - Respuesta - Video
-                contexto_texto = ""
-                for index, row in resultados.iterrows():
-                    contexto_texto += f"""
-                    --- OPCIÓN {index} ---
-                    PREGUNTA DEL MANUAL: {row['Pregunta']}
-                    RESPUESTA DEL MANUAL: {row['Respuesta']}
-                    VIDEO DISPONIBLE: {row['Video']}
-                    -----------------------
-                    """
+            # 1. Busqueda Ranking (Texto)
+            ganadores = buscar_por_puntos(query, df)
+            if ganadores:
+                fuentes.extend(ganadores)
+            
+            # 2. Busqueda Vectorial (IA) - Solo si el ranking dio pocos resultados
+            if len(fuentes) < 2 and collection:
+                vector_results = collection.query(query_texts=[query], n_results=3)
+                if vector_results['metadatas']:
+                    for meta in vector_results['metadatas'][0]:
+                        # Evitar duplicados
+                        if not any(f['pregunta'] == meta['pregunta'] for f in fuentes):
+                            fuentes.append(meta)
+
+            # 3. Generar Respuesta
+            if fuentes:
+                contexto = ""
+                for f in fuentes:
+                    contexto += f"Tema: {f['pregunta']}\nProcedimiento: {f['respuesta']}\nVideo: {f['video']}\n---\n"
                 
-                # 3. Prompt Final
                 prompt = f"""
-                PREGUNTA DEL USUARIO: "{query}"
-
-                CANDIDATOS ENCONTRADOS EN EL MANUAL:
-                {contexto_texto}
-
-                INSTRUCCIÓN: Analiza los candidatos. ¿Cuál responde mejor a la intención del usuario? 
-                Si el usuario pide un proceso simple, evita las respuestas sobre "Errores de sistema" o "Regedit" a menos que sea necesario.
-                Genera la respuesta usando solo el candidato ganador.
+                Eres el asistente oficial de soporte de Baris.
+                Responde al usuario de forma clara, amable y directa usando SOLO la siguiente informacion.
+                Si hay videos disponibles en la informacion, por favor inclúyelos al final de tu respuesta con un formato claro.
+                
+                PREGUNTA DEL USUARIO: {query}
+                
+                INFORMACION DEL SISTEMA:
+                {contexto}
                 """
                 
                 try:
                     response = model.generate_content(prompt)
+                    
+                    # Mostrar respuesta limpia en una tarjeta
+                    st.markdown("### Solución Encontrada")
+                    st.markdown("---")
                     st.markdown(response.text)
                     
-                    # Ver qué opciones consideró la IA
-                    with st.expander("Ver qué encontró el sistema internamente"):
-                        st.dataframe(resultados[['Pregunta', 'Respuesta']])
-                        
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error("Hubo un problema conectando con el cerebro de la IA. Intenta de nuevo.")
+            else:
+                st.error("Lo siento, no encontré información sobre ese tema específico en el manual.")
+                st.info("Intenta reformular la pregunta con otras palabras.")

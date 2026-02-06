@@ -1,10 +1,11 @@
-# Ignorar secretos de Streamlit
-.streamlit/secrets.toml
+# Archivos de Claves (NUNCA SUBIR)
+secrets.toml
+.env
 
-# Ignorar base de datos vectorial (es pesada y se genera local)
+# Archivos Generados / Pesados
 cerebro_baris_db/
-chroma.sqlite3
-
-# Ignorar archivos temporales de Python
 __pycache__/
 *.pyc
+
+# Archivos de Sistema
+.DS_Store
