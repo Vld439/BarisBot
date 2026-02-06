@@ -138,28 +138,3 @@ if st.button("Buscar Solución", type="primary"):
             except Exception as e:
                 st.error(f"Error conectando con Groq: {e}")
 
-                # --- DEBUGGING: HERRAMIENTA DE RAYOS X ---
-# Pega esto al final de tu app.py para ver qué tiene el bot en la panza
-
-with st.sidebar:
-    st.divider()
-    st.header("🕵️‍♂️ Rayos X (Debug)")
-    st.write("Escribe una palabra para ver si REALMENTE está en el CSV:")
-    
-    palabra_clave = st.text_input("Buscar palabra exacta:")
-    
-    if palabra_clave:
-        if df is not None:
-            # Busca la palabra en CUALQUIER columna del CSV (sin IA, búsqueda bruta)
-            mask = df.apply(lambda row: row.astype(str).str.contains(palabra_clave, case=False).any(), axis=1)
-            df_resultado = df[mask]
-            
-            st.write(f"🔍 Resultados encontrados: **{len(df_resultado)}**")
-            
-            if len(df_resultado) > 0:
-                # Muestra la tabla tal cual la ve el bot
-                st.dataframe(df_resultado)
-            else:
-                st.error(f"❌ La palabra '{palabra_clave}' NO existe en el archivo CSV cargado.")
-        else:
-            st.error("⚠️ El archivo CSV no se ha cargado todavía.")
