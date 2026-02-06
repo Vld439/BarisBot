@@ -50,7 +50,42 @@ def get_vector_store():
         return None
 
 collection = get_vector_store()
-model = genai.GenerativeModel("gemini-flash-latest")
+# --- SELECCIÓN DINÁMICA BASADA EN TU LISTA ---
+def configurar_modelo_dinamico():
+    try:
+        print("🔍 Buscando modelo compatible...")
+        modelos_disponibles = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # LISTA EXACTA DE PRIORIDAD
+        # 1. Probamos el 2.0 Flash (Suele tener buen cupo gratuito)
+        # 2. Si falla, el Lite (Más rápido y ligero)
+        # 3. Evitamos el 2.5 al principio para no gastar tus 20 peticiones diarias
+        orden_prioridad = [
+            "models/gemini-2.0-flash",          # <--- MEJOR OPCIÓN
+            "models/gemini-2.0-flash-001",      # Variación del anterior
+            "models/gemini-2.0-flash-lite",     # Respaldo ligero
+            "models/gemini-1.5-flash",          # Clásico (si aparece oculto)
+            "models/gemini-flash-latest"        # Comodín final
+        ]
+
+        modelo_elegido = None
+        for candidato in orden_prioridad:
+            if candidato in modelos_disponibles:
+                modelo_elegido = candidato
+                break
+        
+        # Si no encuentra ninguno de la lista, agarra el primero que tenga disponible
+        if not modelo_elegido and modelos_disponibles:
+            modelo_elegido = modelos_disponibles[0]
+
+        return genai.GenerativeModel(modelo_elegido)
+
+    except Exception as e:
+        # Si todo falla, intentamos forzar el 2.0 Flash
+        return genai.GenerativeModel("models/gemini-2.0-flash")
+
+# --- INICIALIZAR ---
+model = configurar_modelo_dinamico()
 
 # --- MOTOR DE PUNTUACION ---
 def buscar_por_puntos(query, dataframe):
