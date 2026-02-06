@@ -129,7 +129,6 @@ if st.button("Buscar Solución", type="primary"):
                     st.markdown("---")
                     st.markdown(response.text)
                     
-                except Exception as e:
                     except Exception as e:
                         st.error(f"Error REAL: {e}")
             else:
