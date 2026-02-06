@@ -50,42 +50,41 @@ def get_vector_store():
         return None
 
 collection = get_vector_store()
-# --- SELECCIÓN DINÁMICA BASADA EN TU LISTA ---
-def configurar_modelo_dinamico():
-    try:
-        print("🔍 Buscando modelo compatible...")
-        modelos_disponibles = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # LISTA EXACTA DE PRIORIDAD
-        # 1. Probamos el 2.0 Flash (Suele tener buen cupo gratuito)
-        # 2. Si falla, el Lite (Más rápido y ligero)
-        # 3. Evitamos el 2.5 al principio para no gastar tus 20 peticiones diarias
-        orden_prioridad = [
-            "models/gemini-2.0-flash",          # <--- MEJOR OPCIÓN
-            "models/gemini-2.0-flash-001",      # Variación del anterior
-            "models/gemini-2.0-flash-lite",     # Respaldo ligero
-            "models/gemini-1.5-flash",          # Clásico (si aparece oculto)
-            "models/gemini-flash-latest"        # Comodín final
-        ]
+# --- SELECTOR DE SUPERVIVENCIA ---
+def obtener_modelo_funcional():
+    # Lista de "botes salvavidas". 
+    # Ordenados desde el más moderno-ligero hasta el más viejo-confiable.
+    # INCLUIMOS EL 1.5 AUNQUE NO SALGA EN TU LISTA (A veces está oculto pero funciona).
+    candidatos = [
+        "gemini-2.0-flash-lite",      # Nuevo, ligero, suele tener cupo.
+        "gemini-1.5-flash",           # El estándar global (debería funcionar).
+        "gemini-1.5-flash-001",       # Versión específica del 1.5.
+        "gemini-1.5-flash-002",       # Versión específica del 1.5 (Update).
+        "gemini-1.5-pro",             # Más lento, pero a veces tiene cupo.
+        "gemini-pro"                  # El abuelo (versión 1.0). Si este falla, es la cuenta.
+    ]
 
-        modelo_elegido = None
-        for candidato in orden_prioridad:
-            if candidato in modelos_disponibles:
-                modelo_elegido = candidato
-                break
-        
-        # Si no encuentra ninguno de la lista, agarra el primero que tenga disponible
-        if not modelo_elegido and modelos_disponibles:
-            modelo_elegido = modelos_disponibles[0]
-
-        return genai.GenerativeModel(modelo_elegido)
-
-    except Exception as e:
-        # Si todo falla, intentamos forzar el 2.0 Flash
-        return genai.GenerativeModel("models/gemini-2.0-flash")
+    print("Iniciando protocolo de supervivencia de modelos...")
+    
+    for nombre_modelo in candidatos:
+        try:
+            print(f"Probando modelo: {nombre_modelo}...")
+            modelo_test = genai.GenerativeModel(nombre_modelo)
+            # Hacemos una pregunta muda para ver si Google nos patea (429) o nos deja pasar
+            modelo_test.generate_content("test") 
+            
+            print(f"¡CONECTADO! Usaremos: {nombre_modelo}")
+            return modelo_test
+        except Exception as e:
+            print(f" {nombre_modelo} falló o está bloqueado. Pasando al siguiente...")
+            continue
+    
+    # Si llegamos aquí, nada funcionó. Devolvemos el 1.5 por defecto para que salga el error en pantalla.
+    st.error("TODOS los modelos están ocupados o bloqueados en tu cuenta. Intenta crear una API Key nueva en otro proyecto de Google.")
+    return genai.GenerativeModel("gemini-1.5-flash")
 
 # --- INICIALIZAR ---
-model = configurar_modelo_dinamico()
+model = obtener_modelo_funcional()
 
 # --- MOTOR DE PUNTUACION ---
 def buscar_por_puntos(query, dataframe):
