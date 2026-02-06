@@ -56,7 +56,7 @@ def buscar_por_puntos(query, dataframe):
     resultados = []
     for index, row in dataframe.iterrows():
         puntos = 0
-        texto = str(row['Pregunta_Hibrida']).lower()
+        texto = (str(row['Pregunta_Hibrida']) + " " + str(row['Respuesta'])).lower()
         for p in palabras:
             if p in texto: puntos += 1
         if puntos > 0:
