@@ -1,174 +1,46 @@
 import streamlit as st
 import google.generativeai as genai
-import chromadb
-from chromadb.utils import embedding_functions
-import pandas as pd
 import os
 
-# --- CONFIGURACION ---
-st.set_page_config(page_title="Soporte Baris", layout="centered", page_icon="🤖")
+st.set_page_config(page_title="Diagnóstico BarisBot", page_icon="🩺")
 
-hide_streamlit_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            </style>
-            """
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+st.title("🩺 Diagnóstico de Conexión")
 
+# 1. VERIFICACIÓN DE CLAVE (Sin mostrarla completa por seguridad)
 try:
     api_key = st.secrets["GOOGLE_API_KEY"]
+    # Mostramos los primeros y últimos 4 caracteres para que VERIFIQUES si es la nueva
+    clave_visible = f"{api_key[:4]}...{api_key[-4:]}"
+    st.info(f"🔑 Clave detectada: {clave_visible}")
 except:
-    st.error("Error: Falta el archivo secrets.toml o la configuración de secretos en la nube.")
+    st.error(" No se detectó ninguna API Key en los Secrets.")
     st.stop()
 
+# 2. CONFIGURACIÓN
 genai.configure(api_key=api_key)
 
-# --- CARGA DE DATOS ---
-@st.cache_data
-def load_data():
-    path = "base_conocimiento_HIBRIDA.csv"
-    if os.path.exists(path):
-        return pd.read_csv(path).fillna("")
-    return None
+# 3. PRUEBA DE FUEGO
+# Usamos el modelo más estándar y estable del mundo.
+# Si este falla, el problema es 100% la cuenta/clave.
+nombre_modelo = "gemini-2.0-flash-lite-001" 
 
-df = load_data()
+st.write(f" Intentando conectar con: `{nombre_modelo}`...")
 
-@st.cache_resource
-def get_vector_store():
-    try:
-        # Aseguramos que exista el directorio
-        if not os.path.exists("./cerebro_baris_db"):
-            os.makedirs("./cerebro_baris_db")
-            
-        client = chromadb.PersistentClient(path="./cerebro_baris_db")
-        emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="paraphrase-multilingual-MiniLM-L12-v2")
-        # Intentamos obtener o crear la coleccion para evitar errores si esta vacia
-        return client.get_or_create_collection(name="manual_baris", embedding_function=emb_fn)
-    except Exception as e:
-        st.error(f"Error cargando base de datos vectorial: {e}")
-        return None
-
-collection = get_vector_store()
-# --- SELECTOR DE SUPERVIVENCIA ---
-def obtener_modelo_funcional():
-    # Lista de "botes salvavidas". 
-    # Ordenados desde el más moderno-ligero hasta el más viejo-confiable.
-    # INCLUIMOS EL 1.5 AUNQUE NO SALGA EN TU LISTA (A veces está oculto pero funciona).
-    candidatos = [
-        "gemini-2.0-flash-lite",      # Nuevo, ligero, suele tener cupo.
-        "gemini-1.5-flash",           # El estándar global (debería funcionar).
-        "gemini-1.5-flash-001",       # Versión específica del 1.5.
-        "gemini-1.5-flash-002",       # Versión específica del 1.5 (Update).
-        "gemini-1.5-pro",             # Más lento, pero a veces tiene cupo.
-        "gemini-pro"                  # El abuelo (versión 1.0). Si este falla, es la cuenta.
-    ]
-
-    print("Iniciando protocolo de supervivencia de modelos...")
+try:
+    model = genai.GenerativeModel(nombre_modelo)
+    response = model.generate_content("Responde solo con la palabra: ¡CONECTADO!")
     
-    for nombre_modelo in candidatos:
-        try:
-            print(f"Probando modelo: {nombre_modelo}...")
-            modelo_test = genai.GenerativeModel(nombre_modelo)
-            # Hacemos una pregunta muda para ver si Google nos patea (429) o nos deja pasar
-            modelo_test.generate_content("test") 
-            
-            print(f"¡CONECTADO! Usaremos: {nombre_modelo}")
-            return modelo_test
-        except Exception as e:
-            print(f" {nombre_modelo} falló o está bloqueado. Pasando al siguiente...")
-            continue
+    st.success(f" ÉXITO: {response.text}")
+    st.balloons()
     
-    # Si llegamos aquí, nada funcionó. Devolvemos el 1.5 por defecto para que salga el error en pantalla.
-    st.error("TODOS los modelos están ocupados o bloqueados en tu cuenta. Intenta crear una API Key nueva en otro proyecto de Google.")
-    return genai.GenerativeModel("gemini-1.5-flash")
-
-# --- INICIALIZAR ---
-model = obtener_modelo_funcional()
-
-# --- MOTOR DE PUNTUACION ---
-def buscar_por_puntos(query, dataframe):
-    if dataframe is None: return []
-    palabras_usuario = query.lower().split()
-    palabras_clave = [p for p in palabras_usuario if p not in ["una", "el", "la", "de", "para", "en", "como", "quiero", "que"]]
+except Exception as e:
+    # AQUI ES DONDE VEREMOS LA VERDAD
+    st.error(" ERROR FATAL DE GOOGLE:")
+    st.code(str(e)) # Muestra el error técnico crudo
     
-    if not palabras_clave: return []
-
-    resultados = []
-    for index, row in dataframe.iterrows():
-        texto_fila = str(row['Pregunta_Hibrida']).lower()
-        puntos = 0
-        for palabra in palabras_clave:
-            if palabra in texto_fila:
-                puntos += 1
-                if palabra in ["echar", "atras", "revertir", "cancelar", "trabada", "lento", "error", "no sale"]:
-                    puntos += 2 
-
-        if puntos > 0:
-            resultados.append({
-                "puntos": puntos,
-                "pregunta": row['Pregunta_Hibrida'],
-                "respuesta": row['Respuesta'],
-                "video": row['Video']
-            })
-    
-    resultados = sorted(resultados, key=lambda x: x['puntos'], reverse=True)
-    return resultados[:3]
-
-# --- INTERFAZ GRAFICA ---
-st.title("🤖 Soporte Técnico JHF")
-st.markdown("Sistema experto de consultas.")
-
-query = st.text_input("Describa el problema:", placeholder="Ej: No imprime la factura...")
-
-if st.button("Buscar Solución", type="primary"):
-    if not query:
-        st.warning("Por favor escriba una consulta.")
-    else:
-        with st.spinner("Procesando solicitud..."):
-            fuentes = []
-            
-            # 1. Busqueda Ranking
-            ganadores = buscar_por_puntos(query, df)
-            if ganadores:
-                fuentes.extend(ganadores)
-            
-            # 2. Busqueda Vectorial
-            if len(fuentes) < 2 and collection:
-                try:
-                    vector_results = collection.query(query_texts=[query], n_results=3)
-                    if vector_results['metadatas']:
-                        for meta in vector_results['metadatas'][0]:
-                            if not any(f['pregunta'] == meta['pregunta'] for f in fuentes):
-                                fuentes.append(meta)
-                except Exception as e:
-                    print(f"Alerta Vector: {e}")
-
-            # 3. Generar Respuesta
-            if fuentes:
-                contexto = ""
-                for f in fuentes:
-                    contexto += f"Tema: {f['pregunta']}\nProcedimiento: {f['respuesta']}\nVideo: {f['video']}\n---\n"
-                
-                prompt = f"""
-                Actúa como un técnico experto de la empresa JHF.
-                NO saludes con frases largas ni genéricas.
-                Ve directo a la solución del problema paso a paso.
-                Sé conciso, usa listas numeradas y lenguaje profesional.
-                
-                PREGUNTA DEL USUARIO: {query}
-                
-                DATOS TÉCNICOS:
-                {contexto}
-                """
-                
-                try:
-                    response = model.generate_content(prompt)
-                    
-                    st.markdown("### Solución:")
-                    st.markdown(response.text)
-                    
-                except Exception as e:
-                    st.error(f"Error conectando con la IA: {e}")
-            else:
-                st.error("No se encontró información en el manual para esa consulta específica.")
+    st.markdown("""
+    **Guía de Errores Comunes:**
+    * **403 / API key not valid:** La clave en secrets está mal escrita o es la vieja.
+    * **429 / Quota exceeded:** Estás usando la cuenta vieja o la nueva no tiene facturación habilitada (aunque sea gratis, a veces pide verificar tarjeta).
+    * **404 / Not Found:** El nombre del modelo está mal (raro con 1.5-flash).
+    """)
