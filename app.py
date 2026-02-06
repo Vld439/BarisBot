@@ -110,13 +110,14 @@ if st.button("Buscar Solución", type="primary"):
                     contexto += f"Tema: {f['pregunta']}\nProcedimiento: {f['respuesta']}\nVideo: {f['video']}\n---\n"
                 
                 prompt = f"""
-                Eres el asistente oficial de soporte de Baris.
-                Responde al usuario de forma clara, amable y directa usando SOLO la siguiente informacion.
-                Si hay videos disponibles en la informacion, por favor inclúyelos al final de tu respuesta con un formato claro.
+                Actúa como un técnico experto de la empresa JHF.
+                NO saludes con frases largas tipo "Hola, soy el asistente...".
+                Ve directo a la solución del problema.
+                Sé conciso, usa listas numeradas y lenguaje profesional.
                 
-                PREGUNTA DEL USUARIO: {query}
+                PREGUNTA: {query}
                 
-                INFORMACION DEL SISTEMA:
+                DATOS TÉCNICOS:
                 {contexto}
                 """
                 
