@@ -50,7 +50,7 @@ def get_vector_store():
         return None
 
 collection = get_vector_store()
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-flash-latest")
 
 # --- MOTOR DE PUNTUACION ---
 def buscar_por_puntos(query, dataframe):
