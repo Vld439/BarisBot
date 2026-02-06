@@ -130,7 +130,7 @@ if st.button("Buscar Solución", type="primary"):
                     st.markdown(response.text)
                     
                     except Exception as e:
-                        st.error(f"Error REAL: {e}")
+    st.error(f"Error REAL: {e}")
             else:
                 st.error("Lo siento, no encontré información sobre ese tema específico en el manual.")
                 st.info("Intenta reformular la pregunta con otras palabras.")
