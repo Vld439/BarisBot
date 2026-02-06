@@ -49,20 +49,33 @@ def get_vector_store():
 
 collection = get_vector_store()
 
-# --- BUSQUEDA POR PUNTOS ---
+# --- BUSQUEDA MEJORADA (Lee preguntas Y respuestas) ---
 def buscar_por_puntos(query, dataframe):
     if dataframe is None: return []
     palabras = query.lower().split()
     resultados = []
+    
     for index, row in dataframe.iterrows():
         puntos = 0
-        texto = (str(row['Pregunta_Hibrida']) + " " + str(row['Respuesta'])).lower()
+        # TRUCO: Juntamos pregunta y respuesta en un solo texto para buscar
+        texto_completo = (str(row['Pregunta_Hibrida']) + " " + str(row['Respuesta'])).lower()
+        
         for p in palabras:
-            if p in texto: puntos += 1
+            if p in texto_completo: 
+                puntos += 1
+        
+        # Si encuentra palabras clave, guardamos el resultado
         if puntos > 0:
-            resultados.append(row.to_dict())
-    return sorted(resultados, key=lambda x: 1, reverse=True)[:3]
-
+            # Damos un empujoncito extra si la palabra está en el título
+            if query.lower() in str(row['Pregunta_Hibrida']).lower():
+                puntos += 5
+            resultados.append({'fila': row.to_dict(), 'puntos': puntos})
+            
+    # Ordenamos: primero los que tengan más coincidencia (mayor puntaje)
+    resultados = sorted(resultados, key=lambda x: x['puntos'], reverse=True)[:3]
+    
+    # Devolvemos solo los datos limpios
+    return [r['fila'] for r in resultados]
 # --- INTERFAZ ---
 st.title("🤖 Soporte Baris (Motor Llama-3)")
 
