@@ -1,0 +1,10 @@
+# Ignorar secretos de Streamlit
+.streamlit/secrets.toml
+
+# Ignorar base de datos vectorial (es pesada y se genera local)
+cerebro_baris_db/
+chroma.sqlite3
+
+# Ignorar archivos temporales de Python
+__pycache__/
+*.pyc
