@@ -8,7 +8,6 @@ import os
 # --- CONFIGURACION ---
 st.set_page_config(page_title="Soporte Baris", layout="centered", page_icon="🤖")
 
-# Ocultar menu de hamburguesa y footer de Streamlit para que se vea mas profesional
 hide_streamlit_style = """
             <style>
             #MainMenu {visibility: hidden;}
@@ -20,7 +19,7 @@ st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 try:
     api_key = st.secrets["GOOGLE_API_KEY"]
 except:
-    st.error("Error: Falta el archivo secrets.toml")
+    st.error("Error: Falta el archivo secrets.toml o la configuración de secretos en la nube.")
     st.stop()
 
 genai.configure(api_key=api_key)
@@ -38,14 +37,20 @@ df = load_data()
 @st.cache_resource
 def get_vector_store():
     try:
+        # Aseguramos que exista el directorio
+        if not os.path.exists("./cerebro_baris_db"):
+            os.makedirs("./cerebro_baris_db")
+            
         client = chromadb.PersistentClient(path="./cerebro_baris_db")
         emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="paraphrase-multilingual-MiniLM-L12-v2")
-        return client.get_collection(name="manual_baris", embedding_function=emb_fn)
-    except:
+        # Intentamos obtener o crear la coleccion para evitar errores si esta vacia
+        return client.get_or_create_collection(name="manual_baris", embedding_function=emb_fn)
+    except Exception as e:
+        st.error(f"Error cargando base de datos vectorial: {e}")
         return None
 
 collection = get_vector_store()
-model = genai.GenerativeModel("gemini-flash-latest")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 # --- MOTOR DE PUNTUACION ---
 def buscar_por_puntos(query, dataframe):
@@ -63,7 +68,7 @@ def buscar_por_puntos(query, dataframe):
             if palabra in texto_fila:
                 puntos += 1
                 if palabra in ["echar", "atras", "revertir", "cancelar", "trabada", "lento", "error", "no sale"]:
-                    puntos += 2 # Bonificacion por palabras urgentes
+                    puntos += 2 
 
         if puntos > 0:
             resultados.append({
@@ -77,31 +82,33 @@ def buscar_por_puntos(query, dataframe):
     return resultados[:3]
 
 # --- INTERFAZ GRAFICA ---
-st.title(" Asistente Técnico Baris")
-st.markdown("Escribe tu consulta abajo y te ayudaré paso a paso.")
+st.title("🤖 Soporte Técnico JHF")
+st.markdown("Sistema experto de consultas.")
 
-query = st.text_input("¿En qué puedo ayudarte hoy?", placeholder="Ej: No imprime la factura, quiero anular una venta...")
+query = st.text_input("Describa el problema:", placeholder="Ej: No imprime la factura...")
 
 if st.button("Buscar Solución", type="primary"):
     if not query:
-        st.warning("Por favor escribe una consulta.")
+        st.warning("Por favor escriba una consulta.")
     else:
-        with st.spinner("Analizando manual técnico..."):
+        with st.spinner("Procesando solicitud..."):
             fuentes = []
             
-            # 1. Busqueda Ranking (Texto)
+            # 1. Busqueda Ranking
             ganadores = buscar_por_puntos(query, df)
             if ganadores:
                 fuentes.extend(ganadores)
             
-            # 2. Busqueda Vectorial (IA) - Solo si el ranking dio pocos resultados
+            # 2. Busqueda Vectorial
             if len(fuentes) < 2 and collection:
-                vector_results = collection.query(query_texts=[query], n_results=3)
-                if vector_results['metadatas']:
-                    for meta in vector_results['metadatas'][0]:
-                        # Evitar duplicados
-                        if not any(f['pregunta'] == meta['pregunta'] for f in fuentes):
-                            fuentes.append(meta)
+                try:
+                    vector_results = collection.query(query_texts=[query], n_results=3)
+                    if vector_results['metadatas']:
+                        for meta in vector_results['metadatas'][0]:
+                            if not any(f['pregunta'] == meta['pregunta'] for f in fuentes):
+                                fuentes.append(meta)
+                except Exception as e:
+                    print(f"Alerta Vector: {e}")
 
             # 3. Generar Respuesta
             if fuentes:
@@ -111,11 +118,11 @@ if st.button("Buscar Solución", type="primary"):
                 
                 prompt = f"""
                 Actúa como un técnico experto de la empresa JHF.
-                NO saludes con frases largas tipo "Hola, soy el asistente...".
-                Ve directo a la solución del problema.
+                NO saludes con frases largas ni genéricas.
+                Ve directo a la solución del problema paso a paso.
                 Sé conciso, usa listas numeradas y lenguaje profesional.
                 
-                PREGUNTA: {query}
+                PREGUNTA DEL USUARIO: {query}
                 
                 DATOS TÉCNICOS:
                 {contexto}
@@ -124,13 +131,10 @@ if st.button("Buscar Solución", type="primary"):
                 try:
                     response = model.generate_content(prompt)
                     
-                    # Mostrar respuesta limpia en una tarjeta
-                    st.markdown("### Solución Encontrada")
-                    st.markdown("---")
+                    st.markdown("### Solución:")
                     st.markdown(response.text)
                     
-                    except Exception as e:
-    st.error(f"Error REAL: {e}")
+                except Exception as e:
+                    st.error(f"Error conectando con la IA: {e}")
             else:
-                st.error("Lo siento, no encontré información sobre ese tema específico en el manual.")
-                st.info("Intenta reformular la pregunta con otras palabras.")
+                st.error("No se encontró información en el manual para esa consulta específica.")
