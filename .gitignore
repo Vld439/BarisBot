@@ -3,7 +3,6 @@ secrets.toml
 .env
 
 # Archivos Generados / Pesados
-cerebro_baris_db/
 __pycache__/
 *.pyc
 
