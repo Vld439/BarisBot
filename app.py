@@ -114,7 +114,7 @@ if st.button("Buscar Solución", type="primary"):
                         {"role": "system", "content": prompt_sistema},
                         {"role": "user", "content": mensaje_usuario}
                     ],
-                    model="llama3-70b-8192", # Modelo muy potente y rápido
+                    model="llama-3.3-70b-versatile", # Modelo muy potente y rápido
                     temperature=0.2, # Baja temperatura para ser preciso
                 )
                 
