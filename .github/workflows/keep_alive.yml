@@ -1,0 +1,17 @@
+name: Despertador de Baris 
+
+on:
+  schedule:
+    # Se ejecuta cada 15
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping_app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Despertar a Baris
+        run: |
+          curl -I https://barisbot-jhf.streamlit.app/
+          
+          curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" https://barisbot-jhf.streamlit.app/ > /dev/null
