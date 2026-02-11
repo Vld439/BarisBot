@@ -9,93 +9,105 @@ import io
 import os
 import time
 import shutil
+import re
 
-#Configuracion de la pagina
+# Configuracion de la pagina
 st.set_page_config(page_title="Soporte Baris", layout="wide")
 
 # --- FUNCIONES DE MANTENIMIENTO (BARRA LATERAL) ---
 
 def procesar_pdf_y_generar_csv(file_obj):
-    """Lee el PDF subido en memoria y devuelve el DataFrame y el texto CSV"""
+    """
+    Lee el PDF subido en memoria y devuelve el DataFrame y el texto CSV.
+    Usa REGEX para extraccion estructural y IA para sinonimos (con manejo de errores).
+    """
     
-    # Configurar Groq
+    # 1. Configurar Groq (Opcional, si falla seguimos sin sinonimos)
+    client = None
     try:
-        client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+        if "GROQ_API_KEY" in st.secrets:
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
     except:
-        st.error("[ERROR] Falta la GROQ_API_KEY en secrets.")
+        pass # Se procesara en modo texto plano
+
+    # 2. Leer PDF desde memoria
+    texto_completo = ""
+    try:
+        with pdfplumber.open(file_obj) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text() or ""
+                # Limpieza basica de encabezados de WinJes
+                lines = t.split('\n')
+                # Filtramos lineas de encabezado y pie de pagina
+                cleaned_lines = [
+                    l for l in lines 
+                    if "Pág.:" not in l 
+                    and "Fecha:[-]" not in l 
+                    and "Preguntas Frecuentes" not in l
+                    and "ORDEN:Hora" not in l
+                ]
+                texto_completo += "\n".join(cleaned_lines) + "\n"
+    except Exception as e:
         return None, None
 
-    # Leer PDF desde memoria
-    texto_completo = ""
-    with pdfplumber.open(file_obj) as pdf:
-        for page in pdf.pages:
-            t = page.extract_text() or ""
-            # Limpieza basica para reporte WinJes
-            t = t.replace("Preguntas Frecuentes", "").replace("ORDEN:Hora", "")
-            # Eliminar encabezados de pagina repetitivos si es necesario
-            if "Pág.:" in t:
-                lines = t.split('\n')
-                t = '\n'.join([l for l in lines if "Pág.:" not in l and "Fecha:[-]" not in l])
-            texto_completo += t + "\n"
-
-    # Procesar con IA por bloques
-    chunk_size = 3000
-    chunks = [texto_completo[i:i+chunk_size] for i in range(0, len(texto_completo), chunk_size)]
+    # 3. EXTRACCION POR PATRONES (REGEX)
+    # Busca: Texto previo -> "1." -> Texto respuesta -> "(ID)"
+    # (?s) permite que el punto coincida con saltos de linea
+    patron = r"(?s)(.*?)\n\s*1\.\s+(.*?)\s*\((\d+)\)"
+    
+    coincidencias = re.findall(patron, texto_completo)
+    
     datos = []
+    total = len(coincidencias)
     
     status_text = st.empty()
     progress_bar = st.progress(0)
     
-    for i, chunk in enumerate(chunks):
-        status_text.text(f"Procesando bloque {i+1} de {len(chunks)}...")
-        
-        # Prompt para Llama-3 (Con generacion de sinonimos)
-        prompt = f"""
-        Analiza el siguiente texto de un manual tecnico (WinJes) y extrae datos estructurados.
-        
-        FORMATO DE ENTRADA TIPICO:
-        Texto de la pregunta
-        1. Paso uno
-        2. Paso dos
-        (ID_NUMERICO)
+    if total == 0:
+        st.error("[ERROR] No se encontraron preguntas con el formato estandar (Pregunta -> 1. Respuesta -> (ID)).")
+        return None, None
 
-        TU TAREA:
-        Genera una lista CSV separada por pipes (|).
-        Formato: ID|Pregunta Hibrida|Respuesta
-
-        REGLAS CLAVE:
-        1. ID: Es el numero entre parentesis al final del bloque.
-        2. Pregunta Hibrida: Toma la pregunta original y AGREGALE sinonimos entre parentesis.
-           Ejemplo: "Anular Venta" -> "Anular Venta (borrar, cancelar, eliminar factura, echar para atras)"
-        3. Respuesta: Incluye todos los pasos numerados y enlaces (links) si existen.
-        4. Solo genera las lineas de datos, sin introduccion.
-
-        TEXTO: {chunk}
-        """
+    for i, (pregunta_raw, respuesta_raw, id_nota) in enumerate(coincidencias):
+        status_text.text(f"Procesando registro {i+1} de {total} (ID: {id_nota})...")
         
-        try:
-            chat = client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model="llama-3.3-70b-versatile",
-                temperature=0.3
-            )
-            res = chat.choices[0].message.content
-            
-            # Procesar respuesta de la IA
-            for linea in res.split('\n'):
-                if "|" in linea:
-                    parts = linea.split("|")
-                    if len(parts) >= 3:
-                        # Limpieza de ID
-                        id_clean = parts[0].strip().replace("(", "").replace(")", "")
-                        preg = parts[1].strip()
-                        resp = parts[2].strip()
-                        datos.append([id_clean, preg, resp, ""])
-        except Exception as e:
-            st.error(f"Error en bloque {i}: {e}")
+        # Limpieza de texto
+        # Tomamos la ultima linea de la pregunta si viene con basura anterior
+        lineas_pregunta = pregunta_raw.strip().split('\n')
+        pregunta_limpia = lineas_pregunta[-1].strip() if lineas_pregunta else "Sin titulo"
+        # Si la ultima linea es muy corta (menos de 3 chars), tomamos todo el bloque
+        if len(pregunta_limpia) < 3:
+            pregunta_limpia = pregunta_raw.strip()
+
+        respuesta_final = "1. " + respuesta_raw.strip() # Reagregamos el 1.
+        pregunta_hibrida = pregunta_limpia
+
+        # 4. ENRIQUECIMIENTO CON IA (INTENTO)
+        # Solo pedimos sinonimos si tenemos cliente. Si falla, seguimos.
+        if client:
+            try:
+                # Prompt muy corto para gastar pocos tokens
+                prompt = f"Dame 3 palabras clave o sinonimos para buscar esta duda tecnica: '{pregunta_limpia}'. Formato: palabra1, palabra2, palabra3. Sin explicaciones."
+                
+                chat = client.chat.completions.create(
+                    messages=[{"role": "user", "content": prompt}],
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.3,
+                    max_tokens=60 # Limite estricto para ahorrar
+                )
+                sinonimos = chat.choices[0].message.content.replace("\n", " ").strip()
+                pregunta_hibrida = f"{pregunta_limpia} ({sinonimos})"
+                
+            except Exception as e:
+                # Si da error 429 (Rate Limit) u otro, ignoramos y usamos la pregunta original
+                # No imprimimos error para no ensuciar la interfaz
+                pass 
+
+        datos.append([id_nota, pregunta_hibrida, respuesta_final, ""])
         
-        progress_bar.progress((i + 1) / len(chunks))
-        time.sleep(0.5) # Respetar limites de API
+        progress_bar.progress((i + 1) / total)
+        
+        # Pausa breve para no saturar API si funciona
+        if i % 10 == 0: time.sleep(0.2)
 
     progress_bar.empty()
     status_text.empty()
@@ -144,28 +156,31 @@ with st.sidebar:
         if st.button("Procesar y Subir a GitHub"):
             with st.status("Iniciando proceso...", expanded=True) as status:
                 
-                status.write("Leyendo PDF y generando sinonimos...")
+                status.write("Analizando estructura del PDF...")
                 csv_content, df_preview = procesar_pdf_y_generar_csv(uploaded_file)
                 
                 if csv_content:
-                    status.write(f"Se extrajeron {len(df_preview)} registros.")
+                    status.write(f"Se extrajeron {len(df_preview)} registros correctamente.")
                     st.dataframe(df_preview.head(3))
                     
                     status.write("Conectando con GitHub...")
-                    # REPOSITORIO DE DESTINO
+                    
+                    # --- CONFIGURACION DEL REPOSITORIO ---
                     REPO_NAME = "Vld439/BarisBot" 
+                    # -------------------------------------
                     
                     exito, mensaje = actualizar_github(csv_content, REPO_NAME)
                     
                     if exito:
                         status.update(label="Proceso Finalizado", state="complete", expanded=False)
                         st.success(mensaje)
-                        st.info("Por favor espera unos minutos a que Streamlit detecte el cambio y recargue la aplicacion.")
+                        st.info("Por favor espera unos minutos a que Streamlit detecte el cambio y recarga la pagina.")
                     else:
                         status.update(label="Error", state="error")
                         st.error(mensaje)
                 else:
-                    st.error("No se pudo procesar el PDF.")
+                    status.update(label="Error", state="error")
+                    st.error("No se pudo procesar el PDF. Verifica que sea el reporte correcto.")
     
     st.divider()
     st.write("Estado del Sistema: ACTIVO")
@@ -181,16 +196,19 @@ def get_vector_store():
     db_path = "./cerebro_baris_db"
     csv_path = "base_conocimiento_HIBRIDA.csv"
     
-    # Si existe el CSV, intentamos cargar/crear la DB
-    if os.path.exists(csv_path):
-        # Limpieza preventiva: Si el CSV es mas nuevo que la DB, reconstruir
-        # (Aqui simplificamos borrando siempre para asegurar frescura al reiniciar app)
-        if os.path.exists(db_path):
-            try:
-                shutil.rmtree(db_path)
-            except:
-                pass
-        
+    # Verificar si existe el CSV generado
+    if not os.path.exists(csv_path):
+        return None, None
+
+    # Limpieza preventiva si el CSV cambio
+    if os.path.exists(db_path):
+        try:
+            # En entorno local podria dar error de permisos, en nube no
+            shutil.rmtree(db_path) 
+        except:
+            pass
+    
+    try:
         client = chromadb.PersistentClient(path=db_path)
         emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="paraphrase-multilingual-MiniLM-L12-v2"
@@ -200,32 +218,32 @@ def get_vector_store():
         # Leer CSV y poblar DB
         df = pd.read_csv(csv_path).fillna("")
         
-        ids = []
-        docs = []
-        metas = []
-        
-        for _, row in df.iterrows():
-            # ID unico
-            doc_id = str(row['ID'])
-            # Contenido para busqueda semantica (Pregunta + Respuesta)
-            texto = f"{row['Pregunta_Hibrida']} \n {row['Respuesta']}"
+        if collection.count() == 0:
+            ids = []
+            docs = []
+            metas = []
             
-            ids.append(doc_id)
-            docs.append(texto)
-            metas.append({
-                "pregunta": str(row['Pregunta_Hibrida']),
-                "respuesta": str(row['Respuesta']),
-                "video": str(row['Video'])
-            })
-            
-        # Agregar en lotes
-        batch_size = 100
-        for i in range(0, len(ids), batch_size):
-            end = min(i + batch_size, len(ids))
-            collection.add(ids=ids[i:end], documents=docs[i:end], metadatas=metas[i:end])
+            for _, row in df.iterrows():
+                doc_id = str(row['ID'])
+                texto = f"{row['Pregunta_Hibrida']} \n {row['Respuesta']}"
+                
+                ids.append(doc_id)
+                docs.append(texto)
+                metas.append({
+                    "pregunta": str(row['Pregunta_Hibrida']),
+                    "respuesta": str(row['Respuesta']),
+                    "video": str(row['Video'])
+                })
+                
+            # Agregar en lotes
+            batch_size = 100
+            for i in range(0, len(ids), batch_size):
+                end = min(i + batch_size, len(ids))
+                collection.add(ids=ids[i:end], documents=docs[i:end], metadatas=metas[i:end])
             
         return collection, df
-    else:
+    except Exception as e:
+        st.error(f"Error cargando base de datos: {e}")
         return None, None
 
 # Cargar cerebro
@@ -250,7 +268,6 @@ def buscar_por_puntos(query, dataframe):
                 puntos += 1
         
         if puntos > 0:
-            # Bonus si esta en el titulo
             if query.lower() in str(row['Pregunta_Hibrida']).lower():
                 puntos += 5
             resultados.append({'fila': row.to_dict(), 'puntos': puntos})
@@ -266,7 +283,16 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("¿En que puedo ayudarte hoy?"):
+# --- INTERFAZ DE CHAT (OPTIMIZADA A PRUEBA DE FALLOS) ---
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+if prompt := st.chat_input("Escribe tu consulta aqui..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -274,23 +300,28 @@ if prompt := st.chat_input("¿En que puedo ayudarte hoy?"):
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         
-        # 1. Busqueda Vectorial (Semantica)
-        results = collection.query(query_texts=[prompt], n_results=3)
+        # 1. Recuperacion de informacion (No gasta cuota)
         contexto_vectorial = ""
         fuentes = []
         
-        if results['documents']:
-            for i, doc in enumerate(results['documents'][0]):
-                meta = results['metadatas'][0][i]
-                contexto_vectorial += f"Opcion {i+1}:\nPregunta: {meta['pregunta']}\nRespuesta: {meta['respuesta']}\n\n"
-                fuentes.append(meta) # Guardamos para mostrar luego
+        # Busqueda Vectorial
+        try:
+            results = collection.query(query_texts=[prompt], n_results=3)
+            if results['documents']:
+                for i, doc in enumerate(results['documents'][0]):
+                    if i < len(results['metadatas'][0]):
+                        meta = results['metadatas'][0][i]
+                        contexto_vectorial += f"Pregunta: {meta['pregunta']}\nRespuesta: {meta['respuesta']}\n\n"
+                        fuentes.append(meta)
+        except:
+            pass # Si falla vector, seguimos
 
-        # 2. Busqueda por Palabras Clave (Puntos) - Respaldo
+        # Busqueda por Palabras Clave (Respaldo)
         resultados_puntos = buscar_por_puntos(prompt, df_global)
         contexto_puntos = ""
         for row in resultados_puntos:
-            contexto_puntos += f"Coincidencia exacta: {row['Pregunta_Hibrida']} - {row['Respuesta']}\n"
-            # Agregar a fuentes si no estaba
+            contexto_puntos += f"Coincidencia: {row['Pregunta_Hibrida']} - {row['Respuesta']}\n"
+            # Agregar si no esta repetido
             if not any(f['pregunta'] == row['Pregunta_Hibrida'] for f in fuentes):
                 fuentes.append({
                     "pregunta": row['Pregunta_Hibrida'],
@@ -298,50 +329,48 @@ if prompt := st.chat_input("¿En que puedo ayudarte hoy?"):
                     "video": row['Video']
                 })
 
-        # 3. Generar Respuesta con Groq
-        full_prompt = f"""
-        Eres un asistente de soporte tecnico experto en el sistema Baris.
-        Usa la siguiente informacion recuperada de la base de conocimientos para responder al usuario.
-        
-        INFORMACION RECUPERADA (VECTORIAL):
-        {contexto_vectorial}
-        
-        INFORMACION ADICIONAL (PALABRAS CLAVE):
-        {contexto_puntos}
-        
-        PREGUNTA DEL USUARIO: {prompt}
-        
-        INSTRUCCIONES:
-        - Responde de forma directa y amable.
-        - Si la informacion contiene pasos numerados, usalos.
-        - Si hay un ID de nota al final (ej: 3528), mencionalo discretamente.
-        - Si la informacion no es suficiente, di que no lo sabes, no inventes.
-        """
-        
-        try:
-            client_groq = Groq(api_key=st.secrets["GROQ_API_KEY"])
-            chat_completion = client_groq.chat.completions.create(
-                messages=[{"role": "user", "content": full_prompt}],
-                model="llama-3.3-70b-versatile",
-                temperature=0.1,
-            )
-            respuesta = chat_completion.choices[0].message.content
-            message_placeholder.markdown(respuesta)
+        # 2. Generacion de Respuesta
+        if not fuentes:
+            respuesta_final = "No encontre informacion relacionada en el manual."
+            message_placeholder.markdown(respuesta_final)
+        else:
+            # Intentamos usar la IA para resumir
+            try:
+                full_prompt = f"""
+                Eres un asistente tecnico. Responde la duda del usuario usando esta informacion del manual.
+                
+                INFORMACION DEL MANUAL:
+                {contexto_vectorial}
+                {contexto_puntos}
+                
+                PREGUNTA USUARIO: {prompt}
+                
+                Responde directo y conciso.
+                """
+                
+                client_groq = Groq(api_key=st.secrets["GROQ_API_KEY"])
+                chat_completion = client_groq.chat.completions.create(
+                    messages=[{"role": "user", "content": full_prompt}],
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.1,
+                )
+                respuesta_final = chat_completion.choices[0].message.content
+                message_placeholder.markdown(respuesta_final)
             
-            # Mostrar fuentes en desplegable
-            with st.expander("Ver fuentes y detalles tecnicos"):
-                if not fuentes:
-                    st.write("No se encontraron coincidencias exactas en la base de datos.")
+            except Exception as e:
+                # SI LA IA FALLA (Error 429), entra aqui y muestra los datos crudos
+                if "429" in str(e):
+                    st.warning("Alerta: Limite de IA alcanzado. Mostrando resultados directos del manual:")
                 else:
-                    st.write(f"Se consultaron {len(fuentes)} registros:")
-                    for f in fuentes:
-                        st.divider()
-                        st.markdown(f"**Pregunta:** {f['pregunta']}")
-                        st.info(f"**Solucion:** {f['respuesta']}")
-                        if f['video']:
-                            st.markdown(f"**Video:** {f['video']}")
+                    st.error(f"Error de conexion: {e}")
+                
+                respuesta_final = ""
+                for f in fuentes:
+                    st.success(f"**Tema encontrado:** {f['pregunta']}")
+                    st.markdown(f"{f['respuesta']}")
+                    if f['video']:
+                        st.markdown(f"**Video:** {f['video']}")
+                    st.divider()
+                    respuesta_final += f"**{f['pregunta']}**\n{f['respuesta']}\n\n"
 
-            st.session_state.messages.append({"role": "assistant", "content": respuesta})
-
-        except Exception as e:
-            st.error(f"Error generando respuesta: {e}")
+        st.session_state.messages.append({"role": "assistant", "content": respuesta_final})
