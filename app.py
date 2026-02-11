@@ -11,366 +11,245 @@ import time
 import shutil
 import re
 
-# Configuracion de la pagina
+# --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Soporte Baris", layout="wide")
 
-# --- FUNCIONES DE MANTENIMIENTO (BARRA LATERAL) ---
+# --- FUNCIÓN "CAJA DE CAMBIOS" ---
+def consultar_ia_blindada(cliente_groq, prompt, max_tokens=500):
+    """
+    Intenta con varios modelos en orden. Si uno falla, salta al siguiente.
+    Si todos fallan, devuelve None pero NO rompe la app.
+    """
+    modelos = [
+        "llama-3.3-70b-versatile",  # 1. El Potente (Ideal)
+        "llama-3.1-8b-instant",     # 2. El Rápido (Respaldo)
+        "mixtral-8x7b-32768",       # 3. La Alternativa
+        "gemma2-9b-it"              # 4. El Último recurso
+    ]
+    
+    for modelo in modelos:
+        try:
+            chat = cliente_groq.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=modelo,
+                temperature=0.2,
+                max_tokens=max_tokens
+            )
+            return chat.choices[0].message.content
+        except Exception as e:
+            # Si falla (Error 429 o lo que sea), probamos el siguiente silenciosamente
+            continue
+            
+    return None # Si llegamos aquí, es que no hay IA disponible hoy.
+
+# --- FUNCIONES DE MANTENIMIENTO ---
 
 def procesar_pdf_y_generar_csv(file_obj):
-    """
-    Lee el PDF subido en memoria y devuelve el DataFrame y el texto CSV.
-    Usa REGEX para extraccion estructural y IA para sinonimos (con manejo de errores).
-    """
-    
-    # 1. Configurar Groq (Opcional, si falla seguimos sin sinonimos)
+    # 1. Configurar Cliente
     client = None
     try:
         if "GROQ_API_KEY" in st.secrets:
             client = Groq(api_key=st.secrets["GROQ_API_KEY"])
     except:
-        pass # Se procesara en modo texto plano
+        pass
 
-    # 2. Leer PDF desde memoria
+    # 2. Leer PDF (Método seguro)
     texto_completo = ""
     try:
         with pdfplumber.open(file_obj) as pdf:
             for page in pdf.pages:
                 t = page.extract_text() or ""
-                # Limpieza basica de encabezados de WinJes
                 lines = t.split('\n')
-                # Filtramos lineas de encabezado y pie de pagina
-                cleaned_lines = [
-                    l for l in lines 
-                    if "Pág.:" not in l 
-                    and "Fecha:[-]" not in l 
-                    and "Preguntas Frecuentes" not in l
-                    and "ORDEN:Hora" not in l
-                ]
-                texto_completo += "\n".join(cleaned_lines) + "\n"
-    except Exception as e:
+                # Limpieza agresiva de encabezados basura
+                cleaned = [l for l in lines if "Pág.:" not in l and "Fecha:[-]" not in l and "ORDEN:Hora" not in l]
+                texto_completo += "\n".join(cleaned) + "\n"
+    except:
         return None, None
 
-    # 3. EXTRACCION POR PATRONES (REGEX)
-    # Busca: Texto previo -> "1." -> Texto respuesta -> "(ID)"
-    # (?s) permite que el punto coincida con saltos de linea
+    # 3. Extracción con REGEX (Gratis e Infalible)
+    # Patrón: Texto... -> 1. Pasos... -> (ID)
     patron = r"(?s)(.*?)\n\s*1\.\s+(.*?)\s*\((\d+)\)"
-    
     coincidencias = re.findall(patron, texto_completo)
     
     datos = []
     total = len(coincidencias)
-    
-    status_text = st.empty()
     progress_bar = st.progress(0)
-    
+    status_text = st.empty()
+
     if total == 0:
-        st.error("[ERROR] No se encontraron preguntas con el formato estandar (Pregunta -> 1. Respuesta -> (ID)).")
+        st.error("No encontré el formato estándar en el PDF. Revisa que sea el reporte correcto.")
         return None, None
 
-    for i, (pregunta_raw, respuesta_raw, id_nota) in enumerate(coincidencias):
-        status_text.text(f"Procesando registro {i+1} de {total} (ID: {id_nota})...")
+    for i, (preg_raw, resp_raw, id_nota) in enumerate(coincidencias):
+        status_text.text(f"Procesando {i+1}/{total} (ID: {id_nota})...")
         
-        # Limpieza de texto
-        # Tomamos la ultima linea de la pregunta si viene con basura anterior
-        lineas_pregunta = pregunta_raw.strip().split('\n')
-        pregunta_limpia = lineas_pregunta[-1].strip() if lineas_pregunta else "Sin titulo"
-        # Si la ultima linea es muy corta (menos de 3 chars), tomamos todo el bloque
-        if len(pregunta_limpia) < 3:
-            pregunta_limpia = pregunta_raw.strip()
+        # Limpieza
+        lines_p = preg_raw.strip().split('\n')
+        preg_clean = lines_p[-1].strip() if lines_p else "Pregunta General"
+        if len(preg_clean) < 5: preg_clean = preg_raw.strip() # Recuperar si cortamos de más
+        
+        resp_final = "1. " + resp_raw.strip()
+        preg_hibrida = preg_clean
 
-        respuesta_final = "1. " + respuesta_raw.strip() # Reagregamos el 1.
-        pregunta_hibrida = pregunta_limpia
-
-        # 4. ENRIQUECIMIENTO CON IA (INTENTO)
-        # Solo pedimos sinonimos si tenemos cliente. Si falla, seguimos.
+        # 4. Enriquecer con IA (Solo si hay cupo, si no, seguimos igual)
         if client:
-            try:
-                # Prompt muy corto para gastar pocos tokens
-                prompt = f"Dame 3 palabras clave o sinonimos para buscar esta duda tecnica: '{pregunta_limpia}'. Formato: palabra1, palabra2, palabra3. Sin explicaciones."
-                
-                chat = client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt}],
-                    model="llama-3.3-70b-versatile",
-                    temperature=0.3,
-                    max_tokens=60 # Limite estricto para ahorrar
-                )
-                sinonimos = chat.choices[0].message.content.replace("\n", " ").strip()
-                pregunta_hibrida = f"{pregunta_limpia} ({sinonimos})"
-                
-            except Exception as e:
-                # Si da error 429 (Rate Limit) u otro, ignoramos y usamos la pregunta original
-                # No imprimimos error para no ensuciar la interfaz
-                pass 
-
-        datos.append([id_nota, pregunta_hibrida, respuesta_final, ""])
+            prompt_sinonimos = f"Dame 3 sinónimos técnicos breves para buscar: '{preg_clean}'. Solo las palabras, separadas por coma."
+            # Usamos la función blindada con pocos tokens
+            sinonimos = consultar_ia_blindada(client, prompt_sinonimos, max_tokens=30)
+            if sinonimos:
+                preg_hibrida = f"{preg_clean} ({sinonimos})"
         
+        datos.append([id_nota, preg_hibrida, resp_final, ""])
         progress_bar.progress((i + 1) / total)
         
-        # Pausa breve para no saturar API si funciona
-        if i % 10 == 0: time.sleep(0.2)
+        # Pausa táctica para no saturar
+        if i % 10 == 0: time.sleep(0.1)
 
     progress_bar.empty()
     status_text.empty()
     
-    # Crear DataFrame y eliminar duplicados
+    # Crear CSV
     df = pd.DataFrame(datos, columns=["ID", "Pregunta_Hibrida", "Respuesta", "Video"])
     df = df.drop_duplicates(subset=["ID"])
-    
-    # Convertir a CSV String
     csv_buffer = io.StringIO()
     df.to_csv(csv_buffer, index=False)
+    
     return csv_buffer.getvalue(), df
 
-def actualizar_github(nuevo_csv_str, nombre_repo):
-    """Sube el archivo directamente a GitHub usando la API"""
+def actualizar_github(content, repo_name):
     try:
         g = Github(st.secrets["GITHUB_TOKEN"])
-        repo = g.get_repo(nombre_repo)
-        
-        file_path = "base_conocimiento_HIBRIDA.csv"
-        mensaje_commit = "Actualizacion automatica desde Panel de Control"
+        repo = g.get_repo(repo_name)
+        path = "base_conocimiento_HIBRIDA.csv"
+        msg = "Actualizacion automatica (Failover Mode)"
         
         try:
-            # Intentar obtener el archivo existente para actualizarlo
-            contents = repo.get_contents(file_path)
-            repo.update_file(file_path, mensaje_commit, nuevo_csv_str, contents.sha)
-            return True, "[EXITO] Archivo actualizado correctamente en GitHub."
+            contents = repo.get_contents(path)
+            repo.update_file(path, msg, content, contents.sha)
         except:
-            # Si no existe, crearlo
-            repo.create_file(file_path, mensaje_commit, nuevo_csv_str)
-            return True, "[EXITO] Archivo creado en GitHub."
-            
+            repo.create_file(path, msg, content)
+        return True, "Actualizado en GitHub correctamente."
     except Exception as e:
-        return False, f"[ERROR] Fallo la conexion con GitHub: {e}"
+        return False, f"Error GitHub: {e}"
 
-# --- BARRA LATERAL: PANEL DE CONTROL ---
+# --- BARRA LATERAL ---
 with st.sidebar:
-    st.title("Panel de Control")
-    st.divider()
-    st.subheader("Actualizar Base de Conocimientos")
-    st.info("Sube el PDF exportado de WinJes (rp_mref.frx.pdf) para actualizar el bot.")
+    st.header("⚙️ Panel de Control")
+    st.info("Sube el PDF de WinJes para actualizar.")
+    uploaded = st.file_uploader("Archivo PDF", type="pdf")
     
-    uploaded_file = st.file_uploader("Seleccionar PDF", type="pdf")
-    
-    if uploaded_file is not None:
-        if st.button("Procesar y Subir a GitHub"):
-            with st.status("Iniciando proceso...", expanded=True) as status:
-                
-                status.write("Analizando estructura del PDF...")
-                csv_content, df_preview = procesar_pdf_y_generar_csv(uploaded_file)
-                
-                if csv_content:
-                    status.write(f"Se extrajeron {len(df_preview)} registros correctamente.")
-                    st.dataframe(df_preview.head(3))
-                    
-                    status.write("Conectando con GitHub...")
-                    
-                    # --- CONFIGURACION DEL REPOSITORIO ---
-                    REPO_NAME = "Vld439/BarisBot" 
-                    # -------------------------------------
-                    
-                    exito, mensaje = actualizar_github(csv_content, REPO_NAME)
-                    
-                    if exito:
-                        status.update(label="Proceso Finalizado", state="complete", expanded=False)
-                        st.success(mensaje)
-                        st.info("Por favor espera unos minutos a que Streamlit detecte el cambio y recarga la pagina.")
-                    else:
-                        status.update(label="Error", state="error")
-                        st.error(mensaje)
-                else:
-                    status.update(label="Error", state="error")
-                    st.error("No se pudo procesar el PDF. Verifica que sea el reporte correcto.")
-    
-    st.divider()
-    st.write("Estado del Sistema: ACTIVO")
+    if uploaded and st.button("Actualizar Bot"):
+        with st.status("Procesando...", expanded=True) as status:
+            csv, df = procesar_pdf_y_generar_csv(uploaded)
+            if csv:
+                st.write(f"✅ {len(df)} registros extraídos.")
+                REPO = "Vld439/BarisBot" 
+                ok, msg = actualizar_github(csv, REPO)
+                if ok: 
+                    st.success(msg)
+                    time.sleep(2)
+                    st.rerun()
+                else: st.error(msg)
+                status.update(label="Listo", state="complete")
 
-# --- ZONA PRINCIPAL: CHATBOT ---
+# --- CHATBOT ---
+st.title("🤖 Soporte Baris")
 
-st.title("Asistente de Soporte Baris")
-st.write("Escribe tu consulta sobre el sistema.")
-
-# Funcion para cargar/crear la base de datos vectorial
+# Cargar Base de Datos
 @st.cache_resource
-def get_vector_store():
-    db_path = "./cerebro_baris_db"
-    csv_path = "base_conocimiento_HIBRIDA.csv"
-    
-    # Verificar si existe el CSV generado
-    if not os.path.exists(csv_path):
-        return None, None
-
-    # Limpieza preventiva si el CSV cambio
-    if os.path.exists(db_path):
-        try:
-            # En entorno local podria dar error de permisos, en nube no
-            shutil.rmtree(db_path) 
-        except:
-            pass
+def load_db():
+    if not os.path.exists("base_conocimiento_HIBRIDA.csv"): return None, None
+    # Limpieza preventiva
+    if os.path.exists("./cerebro_db"): shutil.rmtree("./cerebro_db")
     
     try:
-        client = chromadb.PersistentClient(path=db_path)
-        emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="paraphrase-multilingual-MiniLM-L12-v2"
-        )
-        collection = client.get_or_create_collection(name="manual_baris", embedding_function=emb_fn)
+        client = chromadb.PersistentClient(path="./cerebro_db")
+        emb = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="paraphrase-multilingual-MiniLM-L12-v2")
+        coll = client.get_or_create_collection("baris_manual", embedding_function=emb)
         
-        # Leer CSV y poblar DB
-        df = pd.read_csv(csv_path).fillna("")
+        df = pd.read_csv("base_conocimiento_HIBRIDA.csv").fillna("")
         
-        if collection.count() == 0:
-            ids = []
-            docs = []
-            metas = []
+        ids, docs, metas = [], [], []
+        for _, r in df.iterrows():
+            ids.append(str(r['ID']))
+            docs.append(f"{r['Pregunta_Hibrida']} \n {r['Respuesta']}")
+            metas.append({"p": r['Pregunta_Hibrida'], "r": r['Respuesta'], "v": r['Video']})
             
-            for _, row in df.iterrows():
-                doc_id = str(row['ID'])
-                texto = f"{row['Pregunta_Hibrida']} \n {row['Respuesta']}"
-                
-                ids.append(doc_id)
-                docs.append(texto)
-                metas.append({
-                    "pregunta": str(row['Pregunta_Hibrida']),
-                    "respuesta": str(row['Respuesta']),
-                    "video": str(row['Video'])
-                })
-                
-            # Agregar en lotes
-            batch_size = 100
-            for i in range(0, len(ids), batch_size):
-                end = min(i + batch_size, len(ids))
-                collection.add(ids=ids[i:end], documents=docs[i:end], metadatas=metas[i:end])
+        # Carga por lotes
+        batch = 100
+        for i in range(0, len(ids), batch):
+            coll.add(ids=ids[i:i+batch], documents=docs[i:i+batch], metadatas=metas[i:i+batch])
             
-        return collection, df
-    except Exception as e:
-        st.error(f"Error cargando base de datos: {e}")
-        return None, None
+        return coll, df
+    except: return None, None
 
-# Cargar cerebro
-collection, df_global = get_vector_store()
+collection, df_global = load_db()
 
-if collection is None:
-    st.warning("No se encontro la base de conocimientos. Por favor sube un PDF en el panel lateral para iniciar.")
+if not collection:
+    st.warning("ALERTA: Sube el PDF en el panel lateral para iniciar el cerebro del bot.")
     st.stop()
 
-# Logica de busqueda hibrida (Puntos)
-def buscar_por_puntos(query, dataframe):
-    if dataframe is None: return []
-    palabras = query.lower().split()
-    resultados = []
-    
-    for index, row in dataframe.iterrows():
-        puntos = 0
-        texto_completo = (str(row['Pregunta_Hibrida']) + " " + str(row['Respuesta'])).lower()
-        
-        for p in palabras:
-            if p in texto_completo: 
-                puntos += 1
-        
-        if puntos > 0:
-            if query.lower() in str(row['Pregunta_Hibrida']).lower():
-                puntos += 5
-            resultados.append({'fila': row.to_dict(), 'puntos': puntos})
-            
-    resultados = sorted(resultados, key=lambda x: x['puntos'], reverse=True)[:3]
-    return [r['fila'] for r in resultados]
+# Chat Logic
+if "messages" not in st.session_state: st.session_state.messages = []
 
-# Interfaz de Chat
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]): st.markdown(m["content"])
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# --- INTERFAZ DE CHAT (OPTIMIZADA A PRUEBA DE FALLOS) ---
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-if prompt := st.chat_input("Escribe tu consulta aqui..."):
+if prompt := st.chat_input("Consulta aquí..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
+    with st.chat_message("user"): st.markdown(prompt)
+    
     with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        
-        # 1. Recuperacion de informacion (No gasta cuota)
-        contexto_vectorial = ""
+        # 1. Buscar Info (Esto nunca falla)
+        contexto = ""
         fuentes = []
         
-        # Busqueda Vectorial
+        # Vectorial
         try:
-            results = collection.query(query_texts=[prompt], n_results=3)
-            if results['documents']:
-                for i, doc in enumerate(results['documents'][0]):
-                    if i < len(results['metadatas'][0]):
-                        meta = results['metadatas'][0][i]
-                        contexto_vectorial += f"Pregunta: {meta['pregunta']}\nRespuesta: {meta['respuesta']}\n\n"
-                        fuentes.append(meta)
-        except:
-            pass # Si falla vector, seguimos
+            res = collection.query(query_texts=[prompt], n_results=3)
+            if res['documents']:
+                for i, meta in enumerate(res['metadatas'][0]):
+                    contexto += f"- {meta['p']}: {meta['r']}\n\n"
+                    fuentes.append(meta)
+        except: pass
+        
+        # Palabras Clave (Respaldo)
+        palabras = prompt.lower().split()
+        for _, row in df_global.iterrows():
+            score = 0
+            txt = (str(row['Pregunta_Hibrida']) + " " + str(row['Respuesta'])).lower()
+            if all(p in txt for p in palabras): # Coincidencia estricta de palabras
+                if not any(f['p'] == row['Pregunta_Hibrida'] for f in fuentes):
+                    contexto += f"- {row['Pregunta_Hibrida']}: {row['Respuesta']}\n"
+                    fuentes.append({"p": row['Pregunta_Hibrida'], "r": row['Respuesta'], "v": row['Video']})
 
-        # Busqueda por Palabras Clave (Respaldo)
-        resultados_puntos = buscar_por_puntos(prompt, df_global)
-        contexto_puntos = ""
-        for row in resultados_puntos:
-            contexto_puntos += f"Coincidencia: {row['Pregunta_Hibrida']} - {row['Respuesta']}\n"
-            # Agregar si no esta repetido
-            if not any(f['pregunta'] == row['Pregunta_Hibrida'] for f in fuentes):
-                fuentes.append({
-                    "pregunta": row['Pregunta_Hibrida'],
-                    "respuesta": row['Respuesta'],
-                    "video": row['Video']
-                })
-
-        # 2. Generacion de Respuesta
+        # 2. Generar Respuesta
         if not fuentes:
-            respuesta_final = "No encontre informacion relacionada en el manual."
-            message_placeholder.markdown(respuesta_final)
+            resp_final = "No encontré información exacta en el manual sobre eso."
         else:
-            # Intentamos usar la IA para resumir
-            try:
-                full_prompt = f"""
-                Eres un asistente tecnico. Responde la duda del usuario usando esta informacion del manual.
-                
-                INFORMACION DEL MANUAL:
-                {contexto_vectorial}
-                {contexto_puntos}
-                
-                PREGUNTA USUARIO: {prompt}
-                
-                Responde directo y conciso.
-                """
-                
-                client_groq = Groq(api_key=st.secrets["GROQ_API_KEY"])
-                chat_completion = client_groq.chat.completions.create(
-                    messages=[{"role": "user", "content": full_prompt}],
-                    model="llama-3.3-70b-versatile",
-                    temperature=0.1,
-                )
-                respuesta_final = chat_completion.choices[0].message.content
-                message_placeholder.markdown(respuesta_final)
+            client = None
+            try: client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            except: pass
             
-            except Exception as e:
-                # SI LA IA FALLA (Error 429), entra aqui y muestra los datos crudos
-                if "429" in str(e):
-                    st.warning("Alerta: Limite de IA alcanzado. Mostrando resultados directos del manual:")
-                else:
-                    st.error(f"Error de conexion: {e}")
-                
-                respuesta_final = ""
+            prompt_ia = f"""
+            Eres experto en Baris. Responde al usuario usando SOLO esta información:
+            {contexto}
+            Pregunta: {prompt}
+            Responde amable y directo.
+            """
+            
+            # Usamos la "Caja de Cambios"
+            resp_ia = None
+            if client:
+                resp_ia = consultar_ia_blindada(client, prompt_ia)
+            
+            if resp_ia:
+                resp_final = resp_ia
+            else:
+                # FALLBACK TOTAL: Si no hay IA, mostramos los datos crudos
+                resp_final = "ALERTA **Modo sin conexión a IA** (Mostrando datos directos):\n\n"
                 for f in fuentes:
-                    st.success(f"**Tema encontrado:** {f['pregunta']}")
-                    st.markdown(f"{f['respuesta']}")
-                    if f['video']:
-                        st.markdown(f"**Video:** {f['video']}")
-                    st.divider()
-                    respuesta_final += f"**{f['pregunta']}**\n{f['respuesta']}\n\n"
+                    resp_final += f"**{f['p']}**\n{f['r']}\n\n---\n"
 
-        st.session_state.messages.append({"role": "assistant", "content": respuesta_final})
+        st.markdown(resp_final)
+        st.session_state.messages.append({"role": "assistant", "content": resp_final})
