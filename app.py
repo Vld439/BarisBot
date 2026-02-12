@@ -14,16 +14,15 @@ import re
 # --- CONFIGURACION DE LA PAGINA ---
 st.set_page_config(page_title="Soporte Baris", layout="wide")
 
-# --- FUNCION DE RESPALDO ---
+# --- FUNCION DE RESPALDO (IA BLINDADA) ---
 def consultar_ia_blindada(cliente_groq, prompt, max_tokens=500):
     """
-    Intenta con varios modelos para evitar bloqueos.
+    Intenta con varios modelos para asegurar la respuesta.
     """
     modelos = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it"
+        "mixtral-8x7b-32768"
     ]
     
     for modelo in modelos:
@@ -36,36 +35,25 @@ def consultar_ia_blindada(cliente_groq, prompt, max_tokens=500):
             )
             return chat.choices[0].message.content
         except:
-            continue
-            
+            continue     
     return None
 
 # --- FUNCIONES DE MANTENIMIENTO ---
 
 def obtener_csv_actual_github(repo_name):
-    """
-    Descarga el CSV actual de GitHub para saber que IDs ya tenemos.
-    Si no existe, devuelve un DataFrame vacio.
-    """
     try:
         if "GITHUB_TOKEN" not in st.secrets:
             return pd.DataFrame(columns=["ID", "Pregunta_Hibrida", "Respuesta", "Video"])
-            
         g = Github(st.secrets["GITHUB_TOKEN"])
         repo = g.get_repo(repo_name)
-        
-        try:
-            file_content = repo.get_contents("base_conocimiento_HIBRIDA.csv")
-            csv_data = file_content.decoded_content.decode("utf-8")
-            return pd.read_csv(io.StringIO(csv_data))
-        except:
-            # El archivo no existe aun en el repo
-            return pd.DataFrame(columns=["ID", "Pregunta_Hibrida", "Respuesta", "Video"])
-    except Exception:
+        file_content = repo.get_contents("base_conocimiento_HIBRIDA.csv")
+        csv_data = file_content.decoded_content.decode("utf-8")
+        return pd.read_csv(io.StringIO(csv_data))
+    except:
         return pd.DataFrame(columns=["ID", "Pregunta_Hibrida", "Respuesta", "Video"])
 
-def procesar_pdf_incremental(file_obj, df_actual):
-    # 1. Configurar Cliente Groq (si existe)
+def procesar_pdf_reporte_limpio(file_obj, df_actual):
+    # 1. Configurar Cliente Groq
     client = None
     try:
         if "GROQ_API_KEY" in st.secrets:
@@ -73,194 +61,226 @@ def procesar_pdf_incremental(file_obj, df_actual):
     except:
         pass
 
-    # 2. Leer PDF
-    texto_completo = ""
+    # Lista de IDs existentes (limpieza de formato)
+    ids_existentes = set()
+    if not df_actual.empty and "ID" in df_actual.columns:
+        # Convertimos a string y quitamos decimales .0 si existen
+        ids_existentes = set(str(x).replace('.0', '').strip() for x in df_actual["ID"].tolist())
+        
+        # Mantenemos datos viejos
+        cols = ["ID", "Pregunta_Hibrida", "Respuesta", "Video"]
+        valid_cols = [c for c in cols if c in df_actual.columns]
+        datos_finales = df_actual[valid_cols].values.tolist()
+    else:
+        datos_finales = []
+
+    nuevos_cont = 0
+    buffer_texto_completo = ""
+
+    # Leemos todo el PDF a texto primero
     try:
         with pdfplumber.open(file_obj) as pdf:
             for page in pdf.pages:
-                t = page.extract_text() or ""
-                lines = t.split('\n')
-                # Limpieza de encabezados WinJes
-                cleaned = [l for l in lines if "Pág.:" not in l and "Fecha:[-]" not in l and "ORDEN:Hora" not in l]
-                texto_completo += "\n".join(cleaned) + "\n"
-    except:
+                texto_pag = page.extract_text()
+                if texto_pag:
+                    buffer_texto_completo += texto_pag + "\n"
+    except Exception as e:
+        st.error(f"Error leyendo PDF: {e}")
         return None, None, 0
 
-    # 3. Extraccion con REGEX
-    patron = r"(?s)(.*?)\n\s*1\.\s+(.*?)\s*\((\d+)\)"
-    coincidencias = re.findall(patron, texto_completo)
+    # --- LÓGICA ESPECÍFICA PARA REPORTE JHF (FRX) ---
+    # El patrón parece ser líneas csv o texto con ID al inicio.
+    # Buscamos bloques que empiecen con un número ID tipo "3434"
     
-    # Lista de IDs que ya tenemos
-    ids_existentes = set(df_actual["ID"].astype(str).tolist())
+    # Dividimos por líneas para analizar estructura
+    lineas = buffer_texto_completo.split('\n')
     
-    # Convertimos el PDF actual a lista para ir agregando lo nuevo
-    # Aseguramos que las columnas sean las correctas
-    if df_actual.empty:
-        datos_finales = []
-    else:
-        # Reordenar columnas por si acaso
-        df_actual = df_actual[["ID", "Pregunta_Hibrida", "Respuesta", "Video"]]
-        datos_finales = df_actual.values.tolist()
-
-    nuevos_cont = 0
-    total = len(coincidencias)
+    bloque_actual_id = None
+    bloque_actual_texto = ""
     
     progress_bar = st.progress(0)
     status_text = st.empty()
+    total_lineas = len(lineas)
 
-    for i, (preg_raw, resp_raw, id_nota) in enumerate(coincidencias):
-        id_nota = str(id_nota)
+    for i, linea in enumerate(lineas):
+        # Regex para detectar inicio de registro: "3434" o 3434 al inicio
+        match_id = re.search(r'^"?(\d{4,6})"?', linea.strip())
         
-        # --- LOGICA INCREMENTAL ---
-        if id_nota in ids_existentes:
-            status_text.text(f"Registro {i+1}/{total} (ID: {id_nota}) -> YA EXISTE. Saltando...")
-            # No hacemos nada, mantenemos el dato viejo que ya esta en datos_finales
+        if match_id:
+            # -- PROCESAR EL BLOQUE ANTERIOR SI EXISTE --
+            if bloque_actual_id:
+                guardar_bloque(bloque_actual_id, bloque_actual_texto, ids_existentes, datos_finales, client, status_text)
+            
+            # Iniciar nuevo bloque
+            bloque_actual_id = match_id.group(1)
+            bloque_actual_texto = linea # Guardamos la primera linea tambien
+            
         else:
-            status_text.text(f"Registro {i+1}/{total} (ID: {id_nota}) -> NUEVO. Procesando...")
-            
-            # Limpieza de la pregunta nueva
-            lines_p = preg_raw.strip().split('\n')
-            preg_clean = lines_p[-1].strip() if lines_p else "Pregunta General"
-            if len(preg_clean) < 5: preg_clean = preg_raw.strip() 
-            
-            resp_final = "1. " + resp_raw.strip()
-            preg_hibrida = preg_clean
+            # Si no es ID, es contenido del bloque actual
+            if bloque_actual_id:
+                # Limpieza de basura común en reportes (Encabezados de pagina)
+                if "JHF" in linea or "Informe de Requisitos" in linea or "Pág.:" in linea or "Fecha:" in linea:
+                    continue
+                bloque_actual_texto += " " + linea
 
-            # Solo usamos IA para este registro nuevo
-            if client:
-                prompt_sinonimos = f"Dame 3 sinonimos tecnicos para: '{preg_clean}'. Solo palabras separadas por coma."
-            
-                sinonimos = consultar_ia_blindada(client, prompt_sinonimos, max_tokens=30)
-                if sinonimos:
-                    preg_hibrida = f"{preg_clean} ({sinonimos})"
-            
-            datos_finales.append([id_nota, preg_hibrida, resp_final, ""])
-            nuevos_cont += 1
-            
-            # Pequeña pausa solo si procesamos IA
-            if client: time.sleep(0.5)
-        
-        progress_bar.progress((i + 1) / total)
+        if i % 50 == 0: progress_bar.progress(min(i / total_lineas, 1.0))
 
-    progress_bar.empty()
-    status_text.empty()
+    # Procesar el último bloque pendiente
+    if bloque_actual_id:
+        guardar_bloque(bloque_actual_id, bloque_actual_texto, ids_existentes, datos_finales, client, status_text)
+
+    progress_bar.progress(1.0)
+    status_text.text("Generando archivo final...")
     
-    # Crear DataFrame final combinado
+    # Crear DataFrame
     df_nuevo = pd.DataFrame(datos_finales, columns=["ID", "Pregunta_Hibrida", "Respuesta", "Video"])
-    # Asegurar que no hay duplicados (priorizando el ultimo por si acaso)
+    # Eliminar duplicados por ID, quedandonos con el ultimo (el mas nuevo)
     df_nuevo = df_nuevo.drop_duplicates(subset=["ID"], keep="last")
     
     csv_buffer = io.StringIO()
     df_nuevo.to_csv(csv_buffer, index=False)
     
-    return csv_buffer.getvalue(), df_nuevo, nuevos_cont
+    cont_real = len(df_nuevo) - len(ids_existentes)
+    # Ajuste visual por si borraste la base, para que no diga 0
+    if len(ids_existentes) == 0: cont_real = len(df_nuevo)
+
+    return csv_buffer.getvalue(), df_nuevo, cont_real
+
+def guardar_bloque(id_nota, texto, ids_existentes, datos_finales, client, status_text):
+    """Analiza el texto acumulado de un registro, separa pregunta/respuesta y guarda"""
+    
+    # Si ya existe, IGNORAR (Logica Incremental)
+    if str(id_nota) in ids_existentes:
+        return
+
+    status_text.text(f"Procesando ID Nuevo: {id_nota}...")
+
+    # Limpieza inicial del texto crudo
+    texto = texto.replace('"', '').replace("'", "") # Quitar comillas del CSV
+    texto = re.sub(r'\s+', ' ', texto).strip()      # Quitar saltos de linea dobles
+    
+    # --- SEPARACION PREGUNTA / RESPUESTA ---
+    # El archivo usa "OBS:" o "Obs:" para marcar la respuesta
+    partes = re.split(r'OBS:?', texto, maxsplit=1, flags=re.IGNORECASE)
+    
+    pregunta = partes[0]
+    # Quitar el ID y fecha que suelen quedar al inicio de la pregunta
+    # Ej: "3434 05/01/07 0663 Procedimiento..." -> "Procedimiento..."
+    pregunta = re.sub(r'^\d+\s+[\d/]+\s+\d+\s+', '', pregunta).strip()
+    
+    if len(partes) > 1:
+        respuesta = "OBS: " + partes[1].strip()
+    else:
+        # A veces no dice OBS, pero empieza con "1."
+        partes_num = re.split(r'(?=\s1\.)', pregunta, maxsplit=1)
+        if len(partes_num) > 1:
+            pregunta = partes_num[0].strip()
+            respuesta = partes_num[1].strip()
+        else:
+            respuesta = "Ver detalle en el manual."
+
+    # Validacion minima
+    if len(pregunta) < 3: return
+
+    # --- IA GENERADORA DE SINONIMOS ---
+    preg_hibrida = pregunta
+    if client:
+        try:
+            # Prompt optimizado para ser rapido
+            prompt = f"Genera 3 sinónimos técnicos breves para buscar: '{pregunta}'. Solo palabras separadas por coma."
+            sinonimos = consultar_ia_blindada(client, prompt, max_tokens=40)
+            if sinonimos:
+                preg_hibrida = f"{pregunta} ({sinonimos})"
+                time.sleep(0.5) # Pausa de seguridad para no saturar API
+        except:
+            pass # Si falla la IA, guardamos sin sinonimos, no rompemos todo
+
+    # Detectar Video
+    video = ""
+    match_vid = re.search(r'(https?://youtu\.?be\S+)', texto)
+    if match_vid: video = match_vid.group(1)
+
+    datos_finales.append([str(id_nota), preg_hibrida, respuesta, video])
+
 
 def actualizar_github(content, repo_name):
     try:
-        if "GITHUB_TOKEN" not in st.secrets:
-            return False, "Falta GITHUB_TOKEN en secrets."
-
+        if "GITHUB_TOKEN" not in st.secrets: return False, "Falta Token"
         g = Github(st.secrets["GITHUB_TOKEN"])
         repo = g.get_repo(repo_name)
         path = "base_conocimiento_HIBRIDA.csv"
-        msg = "Actualizacion incremental automatica"
-        
+        msg = "Actualizacion base limpia"
         try:
             contents = repo.get_contents(path)
             repo.update_file(path, msg, content, contents.sha)
         except:
             repo.create_file(path, msg, content)
-            
-        return True, "Base de datos actualizada en GitHub correctamente."
+        return True, "OK"
     except Exception as e:
-        return False, f"Error conectando con GitHub: {e}"
+        return False, str(e)
 
 # --- BARRA LATERAL ---
 with st.sidebar:
     st.header("Panel de Control")
-    st.info("Sube el PDF de WinJes. Solo se procesaran las preguntas nuevas.")
+    st.info("Sistema listo para archivo JHF (FRX)")
+    uploaded = st.file_uploader("Sube el PDF Limpio", type="pdf")
     
-    uploaded = st.file_uploader("Archivo PDF", type="pdf")
-    
-    if uploaded and st.button("Actualizar Base de Datos"):
-        REPO = "Vld439/BarisBot"
-        
-        with st.status("Iniciando modo incremental...", expanded=True) as status:
-            
-            status.write("1. Descargando base de datos actual de GitHub...")
+    if uploaded and st.button("Actualizar Base"):
+        REPO = "Vld439/BarisBot" # <--- VERIFICA ESTO
+        with st.status("Procesando...", expanded=True) as status:
+            status.write("Descargando base actual...")
             df_actual = obtener_csv_actual_github(REPO)
-            st.write(f"   - Registros actuales en la nube: {len(df_actual)}")
             
-            status.write("2. Analizando PDF en busca de novedades...")
-            csv_str, df_final, cont_nuevos = procesar_pdf_incremental(uploaded, df_actual)
+            status.write("Leyendo reporte y consultando IA...")
+            csv_str, df_final, cont = procesar_pdf_reporte_limpio(uploaded, df_actual)
             
-            if csv_str:
-                if cont_nuevos > 0:
-                    status.write(f"3. Se encontraron {cont_nuevos} preguntas nuevas. Subiendo...")
-                    ok, msg = actualizar_github(csv_str, REPO)
-                    if ok:
-                        status.update(label="Actualizacion Exitosa", state="complete")
-                        st.success(f"Listo. Se agregaron {cont_nuevos} conocimientos nuevos. Total: {len(df_final)}")
-                        time.sleep(2)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-                else:
-                    status.update(label="Sin cambios", state="complete")
-                    st.info("El PDF no contiene ninguna pregunta nueva. La base de datos esta al dia.")
+            if cont > 0:
+                status.write(f"Subiendo {cont} registros nuevos a GitHub...")
+                ok, msg = actualizar_github(csv_str, REPO)
+                if ok: st.success("¡Éxito! Base actualizada."); time.sleep(2); st.rerun()
+                else: st.error(msg)
             else:
-                st.error("Error leyendo el PDF.")
+                status.update(label="Sin novedades", state="complete")
+                st.warning("No se encontraron registros nuevos.")
 
-# --- CHATBOT ---
-st.title("Soporte Baris")
+# --- CHATBOT (Igual que siempre) ---
+st.title("Soporte Baris (Base Limpia)")
 
 @st.cache_resource
 def load_db():
     if not os.path.exists("base_conocimiento_HIBRIDA.csv"): return None, None
     if os.path.exists("./cerebro_db"): shutil.rmtree("./cerebro_db")
-    
     try:
         client = chromadb.PersistentClient(path="./cerebro_db")
         emb = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="paraphrase-multilingual-MiniLM-L12-v2")
         coll = client.get_or_create_collection("baris_manual", embedding_function=emb)
-        
         df = pd.read_csv("base_conocimiento_HIBRIDA.csv").fillna("")
-        
         ids, docs, metas = [], [], []
         for _, r in df.iterrows():
             ids.append(str(r['ID']))
             docs.append(f"{r['Pregunta_Hibrida']} \n {r['Respuesta']}")
             metas.append({"p": r['Pregunta_Hibrida'], "r": r['Respuesta'], "v": r['Video']})
-            
         batch = 100
         for i in range(0, len(ids), batch):
             coll.add(ids=ids[i:i+batch], documents=docs[i:i+batch], metadatas=metas[i:i+batch])
-            
         return coll, df
     except: return None, None
 
 collection, df_global = load_db()
 
 if not collection:
-    st.warning("No hay base de datos local. Si acabas de actualizar, espera un momento o recarga.")
+    st.warning("Esperando base de datos...")
     st.stop()
 
-# Logica del Chat
 if "messages" not in st.session_state: st.session_state.messages = []
-
 for m in st.session_state.messages:
     with st.chat_message(m["role"]): st.markdown(m["content"])
 
-if prompt := st.chat_input("Consulta aqui..."):
+if prompt := st.chat_input("Consulta aquí..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"): st.markdown(prompt)
-    
     with st.chat_message("assistant"):
-        # 1. Busqueda
-        contexto = ""
-        fuentes = []
-        
-        # Vectorial
+        contexto, fuentes = "", []
         try:
             res = collection.query(query_texts=[prompt], n_results=3)
             if res['documents']:
@@ -269,41 +289,29 @@ if prompt := st.chat_input("Consulta aqui..."):
                     fuentes.append(meta)
         except: pass
         
-        # Palabras Clave
+        # Logica Fallback keywords
         palabras = prompt.lower().split()
         for _, row in df_global.iterrows():
             txt = (str(row['Pregunta_Hibrida']) + " " + str(row['Respuesta'])).lower()
-            if all(p in txt for p in palabras): 
-                if not any(f['p'] == row['Pregunta_Hibrida'] for f in fuentes):
-                    contexto += f"- {row['Pregunta_Hibrida']}: {row['Respuesta']}\n"
-                    fuentes.append({"p": row['Pregunta_Hibrida'], "r": row['Respuesta'], "v": row['Video']})
-
-        # 2. Generar Respuesta
+            if all(p in txt for p in palabras) and not any(f['p'] == row['Pregunta_Hibrida'] for f in fuentes):
+                contexto += f"- {row['Pregunta_Hibrida']}: {row['Respuesta']}\n"
+                fuentes.append({"p": row['Pregunta_Hibrida'], "r": row['Respuesta'], "v": row['Video']})
+        
         if not fuentes:
-            resp_final = "No encontre informacion sobre eso en el manual."
+            resp_final = "No encontré información en el manual."
         else:
             client = None
             try: 
-                if "GROQ_API_KEY" in st.secrets:
-                    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+                if "GROQ_API_KEY" in st.secrets: client = Groq(api_key=st.secrets["GROQ_API_KEY"])
             except: pass
             
-            prompt_ia = f"""
-            Eres experto en Baris. Responde usando SOLO esta informacion:
-            {contexto}
-            Pregunta: {prompt}
-            """
+            prompt_ia = f"Eres experto en Baris. Responde SOLO con esto:\n{contexto}\nPregunta: {prompt}"
+            resp_ia = consultar_ia_blindada(client, prompt_ia) if client else None
             
-            resp_ia = None
-            if client:
-                resp_ia = consultar_ia_blindada(client, prompt_ia)
-            
-            if resp_ia:
-                resp_final = resp_ia
+            if resp_ia: resp_final = resp_ia
             else:
-                resp_final = "**Resultados del Manual:**\n\n"
-                for f in fuentes:
-                    resp_final += f"**{f['p']}**\n{f['r']}\n\n---\n"
-
+                resp_final = "**Resultados:**\n\n"
+                for f in fuentes: resp_final += f"**{f['p']}**\n{f['r']}\n\n"
+        
         st.markdown(resp_final)
         st.session_state.messages.append({"role": "assistant", "content": resp_final})
