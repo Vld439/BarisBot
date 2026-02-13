@@ -11,19 +11,19 @@ import time
 import shutil
 import re
 
-# --- CONFIGURACION DE LA PAGINA ---
+# --- CONFIGURACION ---
 st.set_page_config(page_title="BarisBot Soporte Interno", layout="wide")
 
 # --- FUNCION 1: EMBELLECER RESPUESTA ---
 def embellecer_respuesta(texto):
     if not texto: return ""
-    texto = str(texto).replace("OBS:", "**OBSERVACIÓN:**")
+    texto = str(texto).replace("OBS:", "**OBSERVACION:**")
     patron = r'(\s\d+[\-\.\)]\s?)'
     return re.sub(patron, r'\n\n\1', texto)
 
-# --- FUNCION 2: IA BLINDADA (ESTRICTA) ---
-def consultar_ia_blindada(cliente_groq, prompt, max_tokens=500, temperatura=0.0): # <--- TEMPERATURA 0 (ROBOT)
-    modelos = ["llama-3.1-8b-instant", "mixtral-8x7b-32768"] # Modelos más obedientes
+# --- FUNCION 2: IA BLINDADA ---
+def consultar_ia_blindada(cliente_groq, prompt, max_tokens=600, temperatura=0.1):
+    modelos = ["llama-3.1-8b-instant", "mixtral-8x7b-32768", "llama-3.3-70b-versatile"]
     for modelo in modelos:
         try:
             chat = cliente_groq.chat.completions.create(
@@ -31,10 +31,12 @@ def consultar_ia_blindada(cliente_groq, prompt, max_tokens=500, temperatura=0.0)
                 model=modelo, temperature=temperatura, max_tokens=max_tokens
             )
             return chat.choices[0].message.content
-        except: continue     
+        except: 
+            time.sleep(0.5)
+            continue     
     return None
 
-# --- FUNCIONES GITHUB Y PDF (Iguales que antes) ---
+# --- FUNCIONES GITHUB ---
 def obtener_csv_actual_github(repo_name):
     try:
         if "GITHUB_TOKEN" not in st.secrets:
@@ -58,7 +60,7 @@ def subir_csv_a_github(df, repo_name):
         df.to_csv(csv_buffer, index=False)
         content = csv_buffer.getvalue()
         path = "base_conocimiento_HIBRIDA.csv"
-        msg = "Actualización automática desde BarisBot"
+        msg = "Actualizacion automatica desde BarisBot"
         try:
             contents = repo.get_contents(path)
             repo.update_file(path, msg, content, contents.sha)
@@ -67,6 +69,7 @@ def subir_csv_a_github(df, repo_name):
         return True, "OK"
     except Exception as e: return False, str(e)
 
+# --- FUNCION 4: PROCESAR PDF ---
 def procesar_pdf_completo(file_obj, df_actual):
     client = None
     try:
@@ -139,8 +142,7 @@ def procesar_pdf_completo(file_obj, df_actual):
         preg_hibrida = pregunta
         if client:
             try:
-                # Prompt de sinónimos
-                prompt = f"Genera 3 sinónimos técnicos o palabras coloquiales (ej: borrar, anular, cancelar) para buscar: '{pregunta}'. Solo devuelve las palabras separadas por coma."
+                prompt = f"Genera 3 sinónimos técnicos o palabras clave para: '{pregunta}'. Solo palabras separadas por coma."
                 sinonimos = consultar_ia_blindada(client, prompt, max_tokens=40)
                 if sinonimos: preg_hibrida = f"{pregunta} ({sinonimos})"
                 time.sleep(0.1)
@@ -155,7 +157,7 @@ def procesar_pdf_completo(file_obj, df_actual):
     df_nuevo = df_nuevo.drop_duplicates(subset=["ID"], keep="last")
     return df_nuevo, count_nuevos, "OK"
 
-# --- INIT Y MAIN ---
+# --- INIT ---
 REPO = "Vld439/BarisBot" 
 FILE_PATH = "base_conocimiento_HIBRIDA.csv"
 
@@ -189,27 +191,26 @@ with st.sidebar:
     st.header("Panel de Control")
     uploaded_file = st.file_uploader("Actualizar Manual (PDF)", type="pdf")
     if uploaded_file and st.button("Procesar y Actualizar"):
-        with st.status("Iniciando actualización...", expanded=True) as status:
-            status.write("Descargando versión actual...")
+        with st.status("Iniciando actualizacion...", expanded=True) as status:
+            status.write("Descargando version actual...")
             df_actual = obtener_csv_actual_github(REPO)
-            status.write("Leyendo PDF y generando sinónimos...")
+            status.write("Leyendo PDF y generando sinonimos...")
             df_nuevo, cant, msg = procesar_pdf_completo(uploaded_file, df_actual)
             if df_nuevo is not None and cant > 0:
                 status.write(f"Subiendo {cant} registros a GitHub...")
                 ok, gh_msg = subir_csv_a_github(df_nuevo, REPO)
                 if ok:
                     df_nuevo.to_csv(FILE_PATH, index=False)
-                    status.update(label="¡Éxito!", state="complete", expanded=False)
-                    st.balloons()
+                    status.update(label="Exito", state="complete", expanded=False)
                     st.success(f"Base actualizada con {len(df_nuevo)} registros.")
-                    st.warning("Recarga la página para usar los nuevos datos.")
+                    st.warning("Recarga la pagina para usar los nuevos datos.")
                 else:
                     status.update(label="Error GitHub", state="error"); st.error(f"Error: {gh_msg}")
             else:
                 status.update(label="Error Lectura", state="error"); st.error(f"Error: {msg}")
 
 st.title("BarisBot soporte interno")
-if not collection: st.warning("Base vacía. Sube el PDF."); st.stop()
+if not collection: st.warning("Base vacia. Sube el PDF."); st.stop()
 
 if "messages" not in st.session_state: st.session_state.messages = []
 for m in st.session_state.messages:
@@ -219,11 +220,16 @@ if prompt := st.chat_input("Escribe tu consulta..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"): st.markdown(prompt)
     with st.chat_message("assistant"):
+        
+        query_busqueda = prompt
+        if len(prompt.split()) < 4 and len(st.session_state.messages) > 1:
+            ultimo_user = [m['content'] for m in st.session_state.messages if m['role'] == 'user'][-2]
+            query_busqueda = f"{ultimo_user} {prompt}"
+        
         contexto, fuentes = "", []
         
-        # 1. BUSQUEDA
         try:
-            res = collection.query(query_texts=[prompt], n_results=3) # Trae top 3
+            res = collection.query(query_texts=[query_busqueda], n_results=3)
             if res['documents']:
                 for i, meta in enumerate(res['metadatas'][0]):
                     r_bonita = embellecer_respuesta(meta['r'])
@@ -232,43 +238,50 @@ if prompt := st.chat_input("Escribe tu consulta..."):
         except: pass
         
         palabras = prompt.lower().split()
-        for _, row in df_global.iterrows():
-            txt = (str(row['Pregunta_Hibrida']) + " " + str(row['Respuesta'])).lower()
-            if all(p in txt for p in palabras) and not any(f['p'] == row['Pregunta_Hibrida'] for f in fuentes):
-                r_bonita = embellecer_respuesta(row['Respuesta'])
-                contexto += f"- {row['Pregunta_Hibrida']}: {r_bonita}\n"
-                fuentes.append({"p": row['Pregunta_Hibrida'], "r": r_bonita, "v": row['Video']})
+        if len(palabras) > 2:
+            for _, row in df_global.iterrows():
+                txt = (str(row['Pregunta_Hibrida']) + " " + str(row['Respuesta'])).lower()
+                if all(p in txt for p in palabras) and not any(f['p'] == row['Pregunta_Hibrida'] for f in fuentes):
+                    r_bonita = embellecer_respuesta(row['Respuesta'])
+                    contexto += f"- {row['Pregunta_Hibrida']}: {r_bonita}\n"
+                    fuentes.append({"p": row['Pregunta_Hibrida'], "r": r_bonita, "v": row['Video']})
+        
         if not fuentes:
-            resp_final = "No encontré información en el manual sobre ese tema. Por favor intenta con otras palabras o revisa si el tema existe en el PDF."
+            resp_final = "No encontre informacion especifica en el manual sobre eso."
         else:
             client = None
             try: 
                 if "GROQ_API_KEY" in st.secrets: client = Groq(api_key=st.secrets["GROQ_API_KEY"])
             except: pass
             
+            resp_ia = None
             if client:
                 prompt_ia = f"""
-                ERES UN ASISTENTE DE SOPORTE TÉCNICO ESTRICTO.
-                
-                TU FUENTE DE VERDAD ES ÚNICAMENTE ESTE CONTEXTO:
+                Eres un asistente de soporte Baris.
+                CONTEXTO DEL MANUAL:
                 {contexto}
+                PREGUNTA: {prompt}
                 
-                PREGUNTA DEL USUARIO: {prompt}
-                
-                REGLAS ABSOLUTAS:
-                1. SOLO responde usando la información del CONTEXTO de arriba.
-                2. SI LA RESPUESTA NO ESTÁ EN EL CONTEXTO, DI: "La información encontrada no responde exactamente a tu pregunta".
-                3. NO INVENTES PASOS. NO INVENTES LINKS DE YOUTUBE.
-                4. Si hay pasos numerados en el contexto, úsalos tal cual.
-                5. Sé conciso.
+                REGLAS:
+                1. Responde SOLO con la informacion del CONTEXTO.
+                2. Si no responde a la pregunta, dilo claramente.
+                3. NO INVENTES.
+                4. Usa formato de lista si hay pasos.
                 """
                 resp_ia = consultar_ia_blindada(client, prompt_ia)
-                resp_final = resp_ia if resp_ia else "Error en IA."
+            
+            videos_encontrados = ""
+            for f in fuentes:
+                if f['v'] and len(f['v']) > 10:
+                    videos_encontrados += f"\n\n**Video Tutorial:** {f['v']}"
+            
+            if resp_ia:
+                resp_final = resp_ia + videos_encontrados
             else:
-                resp_final = "**Resultados encontrados:**\n\n"
+                resp_final = "**Resultados del Manual:**\n\n"
                 for f in fuentes:
-                    vid = f"\n📺 [Ver Video]({f['v']})" if f['v'] else ""
-                    resp_final += f"### {f['p']}\n{f['r']}{vid}\n\n"
-        
+                    resp_final += f"### {f['p']}\n{f['r']}\n\n"
+                resp_final += videos_encontrados
+
         st.markdown(resp_final)
         st.session_state.messages.append({"role": "assistant", "content": resp_final})
