@@ -166,7 +166,7 @@ def procesar_pdf_completo(file_obj, df_actual):
 
         preg_hibrida = pregunta
         if client:
-            try
+            try:
                 prompt = f"Genera 3 sinónimos técnicos o palabras clave coloquiales para buscar este problema: '{pregunta}'. Solo devuelve las palabras separadas por coma."
                 sinonimos = consultar_ia_blindada(client, prompt, max_tokens=40)
                 if sinonimos: preg_hibrida = f"{pregunta} ({sinonimos})"
