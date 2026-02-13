@@ -147,7 +147,7 @@ def procesar_pdf_reporte_limpio(file_obj, df_actual):
     status_text.empty()
     
     # DEBUG INFO VISUAL
-    st.sidebar.info(f"✅ Registros leídos del PDF: {registros_encontrados}")
+    st.sidebar.info(f" Registros leídos del PDF: {registros_encontrados}")
     
     # Crear DataFrame
     df_nuevo = pd.DataFrame(datos_finales, columns=["ID", "Pregunta_Hibrida", "Respuesta", "Video"])
@@ -161,7 +161,7 @@ def procesar_pdf_reporte_limpio(file_obj, df_actual):
     # Si la base estaba vacía, todos son nuevos
     if len(ids_existentes) == 0: cont_real = len(df_nuevo)
     
-    st.sidebar.info(f"🚀 Registros NUEVOS a guardar: {cont_real}")
+    st.sidebar.info(f"Registros NUEVOS a guardar: {cont_real}")
 
     return csv_buffer.getvalue(), df_nuevo, cont_real
 
@@ -251,31 +251,40 @@ def actualizar_github(content, repo_name):
 # --- BARRA LATERAL ---
 with st.sidebar:
     st.header("Panel de Control")
-    st.info("Sistema listo para archivo PDF (FRX)")
-    uploaded = st.file_uploader("Sube el PDF", type="pdf")
+    st.info("Sistema listo para archivo JHF (FRX)")
+    uploaded = st.file_uploader("Sube el PDF Limpio", type="pdf")
     
     if uploaded and st.button("Actualizar Base"):
         REPO = "Vld439/BarisBot" 
+        
+        # Usamos un contenedor vacío para ir mostrando el progreso sin borrar lo anterior
+        status_box = st.empty()
+        log_box = st.empty()
+        
         with st.status("Procesando...", expanded=True) as status:
             status.write("Descargando base actual...")
             df_actual = obtener_csv_actual_github(REPO)
             
             status.write("Analizando PDF y consultando IA...")
-            # Aquí llamamos a la función que ahora tiene LOGS VISUALES
+            # Llamamos a la función
             csv_str, df_final, cont = procesar_pdf_reporte_limpio(uploaded, df_actual)
             
             if len(df_final) > 0:
                 status.write(f"Guardando {cont} registros nuevos en GitHub...")
                 ok, msg = actualizar_github(csv_str, REPO)
+                
                 if ok: 
-                    st.success("¡Éxito! Base actualizada.")
-                    time.sleep(2)
-                    st.rerun()
+                    status.update(label="¡Completado!", state="complete", expanded=False)
+                    # AQUÍ EL CAMBIO: Quitamos el st.rerun() y ponemos globos
+                    st.balloons()
+                    st.success(f"¡ÉXITO TOTAL!\n\nSe han guardado {cont} registros nuevos.\n\nLa base ahora tiene {len(df_final)} preguntas.")
+                    st.warning(" Nota: No cierres ni recargues la página hasta ver este mensaje.")
                 else: 
-                    st.error(f"Error GitHub: {msg}")
+                    status.update(label="Error", state="error")
+                    st.error(f" Error al subir a GitHub: {msg}")
             else:
-                st.error("Error: No se generaron registros validos.")
-
+                status.update(label="Sin datos", state="error")
+                st.error(" Error: El PDF no generó registros válidos. Revisa si el formato cambió.")
 # --- CHATBOT ---
 st.title("BarisBot soporte interno")
 
