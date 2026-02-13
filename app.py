@@ -74,25 +74,22 @@ def procesar_pdf_reporte_limpio(file_obj, df_actual):
     else:
         datos_finales = []
 
-    nuevos_cont = 0
     buffer_texto_completo = ""
+    registros_encontrados = 0
 
-    # Leemos todo el PDF a texto primero
+    # Leemos todo el PDF a texto
     try:
         with pdfplumber.open(file_obj) as pdf:
             for page in pdf.pages:
-                texto_pag = page.extract_text()
+                # Usamos extract_text simple para capturar el flujo crudo (con comillas)
+                texto_pag = page.extract_text() 
                 if texto_pag:
                     buffer_texto_completo += texto_pag + "\n"
     except Exception as e:
         st.error(f"Error leyendo PDF: {e}")
         return None, None, 0
 
-    # --- LÓGICA ESPECÍFICA PARA REPORTE JHF (FRX) ---
-    # El patrón parece ser líneas csv o texto con ID al inicio.
-    # Buscamos bloques que empiecen con un número ID tipo "3434"
-    
-    # Dividimos por líneas para analizar estructura
+    # --- LÓGICA ESPECÍFICA PARA REPORTE JHF (FORMATO CSV EN PDF) ---
     lineas = buffer_texto_completo.split('\n')
     
     bloque_actual_id = None
@@ -103,75 +100,97 @@ def procesar_pdf_reporte_limpio(file_obj, df_actual):
     total_lineas = len(lineas)
 
     for i, linea in enumerate(lineas):
-        # Regex para detectar inicio de registro: "3434" o 3434 al inicio
-        match_id = re.search(r'^"?(\d{4,6})"?', linea.strip())
+        linea_raw = linea.strip()
+        if not linea_raw: continue
+
+        # REGEX: Detectar inicio de registro: "3434" o 3434
+        match_id = re.search(r'^"?(\d{3,6})"?', linea_raw)
         
-        if match_id:
-            # -- PROCESAR EL BLOQUE ANTERIOR SI EXISTE --
+        # ¿Es una línea de continuación? (Empieza con ,,,)
+        es_continuacion = linea_raw.startswith(",,,")
+        
+        es_nuevo_registro = False
+        if match_id and not es_continuacion:
+            # Filtro extra: asegurar que no sea una fecha disfrazada
+            if not re.search(r'^"?\d{2}/\d{2}/\d{2}', linea_raw):
+                es_nuevo_registro = True
+
+        if es_nuevo_registro:
+            # -- PROCESAR EL BLOQUE ANTERIOR --
             if bloque_actual_id:
                 guardar_bloque(bloque_actual_id, bloque_actual_texto, ids_existentes, datos_finales, client, status_text)
             
             # Iniciar nuevo bloque
             bloque_actual_id = match_id.group(1)
-            bloque_actual_texto = linea # Guardamos la primera linea tambien
+            bloque_actual_texto = linea_raw 
+            registros_encontrados += 1
             
         else:
-            # Si no es ID, es contenido del bloque actual
+            # Es continuación del bloque actual
             if bloque_actual_id:
-                # Limpieza de basura común en reportes (Encabezados de pagina)
-                if "JHF" in linea or "Informe de Requisitos" in linea or "Pág.:" in linea or "Fecha:" in linea:
-                    continue
-                bloque_actual_texto += " " + linea
+                # Limpiar las comas de continuación ",,," del inicio
+                linea_limpia = re.sub(r'^,+', '', linea_raw)
+                bloque_actual_texto += " " + linea_limpia
 
-        if i % 50 == 0: progress_bar.progress(min(i / total_lineas, 1.0))
+        if i % 100 == 0: progress_bar.progress(min(i / total_lineas, 1.0))
 
     # Procesar el último bloque pendiente
     if bloque_actual_id:
         guardar_bloque(bloque_actual_id, bloque_actual_texto, ids_existentes, datos_finales, client, status_text)
 
     progress_bar.progress(1.0)
-    status_text.text("Generando archivo final...")
+    
+    # DEBUG INFO
+    st.info(f"Registros leídos del PDF: {registros_encontrados}")
     
     # Crear DataFrame
     df_nuevo = pd.DataFrame(datos_finales, columns=["ID", "Pregunta_Hibrida", "Respuesta", "Video"])
-    # Eliminar duplicados por ID, quedandonos con el ultimo (el mas nuevo)
+    # Eliminar duplicados por ID (mantener el último)
     df_nuevo = df_nuevo.drop_duplicates(subset=["ID"], keep="last")
     
     csv_buffer = io.StringIO()
     df_nuevo.to_csv(csv_buffer, index=False)
     
     cont_real = len(df_nuevo) - len(ids_existentes)
-    # Ajuste visual por si borraste la base, para que no diga 0
     if len(ids_existentes) == 0: cont_real = len(df_nuevo)
 
     return csv_buffer.getvalue(), df_nuevo, cont_real
 
 def guardar_bloque(id_nota, texto, ids_existentes, datos_finales, client, status_text):
-    """Analiza el texto acumulado de un registro, separa pregunta/respuesta y guarda"""
+    """Limpia el texto sucio tipo CSV y separa pregunta/respuesta"""
     
     # Si ya existe, IGNORAR (Logica Incremental)
     if str(id_nota) in ids_existentes:
         return
 
-    status_text.text(f"Procesando ID Nuevo: {id_nota}...")
+    # status_text.text(f"Procesando ID Nuevo: {id_nota}...")
 
-    # Limpieza inicial del texto crudo
-    texto = texto.replace('"', '').replace("'", "") # Quitar comillas del CSV
-    texto = re.sub(r'\s+', ' ', texto).strip()      # Quitar saltos de linea dobles
+    # 1. Limpieza masiva de caracteres basura del CSV
+    # Reemplazamos comillas dobles y comas residuales
+    texto_limpio = texto.replace('"', '').strip()
     
-    # --- SEPARACION PREGUNTA / RESPUESTA ---
-    # El archivo usa "OBS:" o "Obs:" para marcar la respuesta
-    partes = re.split(r'OBS:?', texto, maxsplit=1, flags=re.IGNORECASE)
+    # 2. SEPARACION PREGUNTA / RESPUESTA
+    # Buscamos "OBS:" o "Obs:"
+    partes = re.split(r'OBS:?', texto_limpio, maxsplit=1, flags=re.IGNORECASE)
     
-    pregunta = partes[0]
-    # Quitar el ID y fecha que suelen quedar al inicio de la pregunta
-    # Ej: "3434 05/01/07 0663 Procedimiento..." -> "Procedimiento..."
-    pregunta = re.sub(r'^\d+\s+[\d/]+\s+\d+\s+', '', pregunta).strip()
+    pregunta_sucia = partes[0]
+    
+    # 3. LIMPIEZA DE LA CABECERA (Donde está el ID, Fecha y Codigo)
+    # Formato tipico: 3434 05/01/07 0663 Procedimiento...
+    
+    # a) Quitar ID del inicio
+    pregunta = re.sub(r'^\d+\s*', '', pregunta_sucia)
+    # b) Quitar fechas dd/mm/yy
+    pregunta = re.sub(r'\d{2}/\d{2}/\d{2}\s*', '', pregunta)
+    # c) Quitar codigos de 3-4 letras/numeros (JHF, 0663)
+    pregunta = re.sub(r'^[A-Z0-9]{3,4}\s+', '', pregunta)
+    # d) Quitar comas iniciales sueltas
+    pregunta = re.sub(r'^,\s*', '', pregunta).strip()
     
     if len(partes) > 1:
         respuesta = "OBS: " + partes[1].strip()
     else:
-        # A veces no dice OBS, pero empieza con "1."
+        # Fallback si no hay OBS: Buscar "1."
         partes_num = re.split(r'(?=\s1\.)', pregunta, maxsplit=1)
         if len(partes_num) > 1:
             pregunta = partes_num[0].strip()
@@ -186,19 +205,22 @@ def guardar_bloque(id_nota, texto, ids_existentes, datos_finales, client, status
     preg_hibrida = pregunta
     if client:
         try:
-            # Prompt optimizado para ser rapido
-            prompt = f"Genera 3 sinónimos técnicos breves para buscar: '{pregunta}'. Solo palabras separadas por coma."
+            # Limitamos el texto para no confundir a la IA
+            texto_ia = pregunta[:200]
+            prompt = f"Genera 3 sinónimos técnicos breves para buscar: '{texto_ia}'. Solo palabras separadas por coma."
             sinonimos = consultar_ia_blindada(client, prompt, max_tokens=40)
             if sinonimos:
                 preg_hibrida = f"{pregunta} ({sinonimos})"
-                time.sleep(0.5) # Pausa de seguridad para no saturar API
+                time.sleep(0.5) # Pausa de seguridad
         except:
-            pass # Si falla la IA, guardamos sin sinonimos, no rompemos todo
+            pass 
 
     # Detectar Video
     video = ""
     match_vid = re.search(r'(https?://youtu\.?be\S+)', texto)
-    if match_vid: video = match_vid.group(1)
+    if match_vid: 
+        # Limpiar posible basura al final del link
+        video = match_vid.group(1).replace(',', '').strip()
 
     datos_finales.append([str(id_nota), preg_hibrida, respuesta, video])
 
@@ -226,24 +248,27 @@ with st.sidebar:
     uploaded = st.file_uploader("Sube el PDF Limpio", type="pdf")
     
     if uploaded and st.button("Actualizar Base"):
-        REPO = "Vld439/BarisBot" # <--- VERIFICA ESTO
+        REPO = "Vld439/BarisBot" 
         with st.status("Procesando...", expanded=True) as status:
             status.write("Descargando base actual...")
             df_actual = obtener_csv_actual_github(REPO)
             
-            status.write("Leyendo reporte y consultando IA...")
+            status.write("Analizando PDF y consultando IA...")
             csv_str, df_final, cont = procesar_pdf_reporte_limpio(uploaded, df_actual)
             
-            if cont > 0:
-                status.write(f"Subiendo {cont} registros nuevos a GitHub...")
+            if len(df_final) > 0:
+                status.write(f"Guardando {cont} registros nuevos en GitHub...")
                 ok, msg = actualizar_github(csv_str, REPO)
-                if ok: st.success("¡Éxito! Base actualizada."); time.sleep(2); st.rerun()
-                else: st.error(msg)
+                if ok: 
+                    st.success("¡Éxito! Base actualizada.")
+                    time.sleep(2)
+                    st.rerun()
+                else: 
+                    st.error(f"Error GitHub: {msg}")
             else:
-                status.update(label="Sin novedades", state="complete")
-                st.warning("No se encontraron registros nuevos.")
+                st.error("Error: No se generaron registros validos.")
 
-# --- CHATBOT (Igual que siempre) ---
+# --- CHATBOT ---
 st.title("Soporte Baris (Base Limpia)")
 
 @st.cache_resource
