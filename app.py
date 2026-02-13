@@ -14,10 +14,11 @@ import re
 # --- CONFIGURACION ---
 st.set_page_config(page_title="BarisBot Soporte Interno", layout="wide")
 
-# --- FUNCION 1: EMBELLECER RESPUESTA ---
+# --- FUNCION 1: MAQUILLAJE DE TEXTO ---
 def embellecer_respuesta(texto):
     if not texto: return ""
     texto = str(texto).replace("OBS:", "**OBSERVACION:**")
+    # Detecta pasos numerados (1-, 1., 2)) y agrega saltos de linea
     patron = r'(\s\d+[\-\.\)]\s?)'
     return re.sub(patron, r'\n\n\1', texto)
 
@@ -60,7 +61,7 @@ def subir_csv_a_github(df, repo_name):
         df.to_csv(csv_buffer, index=False)
         content = csv_buffer.getvalue()
         path = "base_conocimiento_HIBRIDA.csv"
-        msg = "Actualizacion automatica desde BarisBot"
+        msg = "Actualizacion automatica BarisBot"
         try:
             contents = repo.get_contents(path)
             repo.update_file(path, msg, content, contents.sha)
@@ -142,8 +143,9 @@ def procesar_pdf_completo(file_obj, df_actual):
         preg_hibrida = pregunta
         if client:
             try:
-                prompt = f"Genera 3 sinónimos técnicos o palabras clave para: '{pregunta}'. Solo palabras separadas por coma."
-                sinonimos = consultar_ia_blindada(client, prompt, max_tokens=40)
+                # Prompt mas simple para evitar errores
+                prompt = f"Dame 3 palabras clave o sinonimos para: '{pregunta}'. Solo palabras separadas por coma."
+                sinonimos = consultar_ia_blindada(client, prompt, max_tokens=30)
                 if sinonimos: preg_hibrida = f"{pregunta} ({sinonimos})"
                 time.sleep(0.1)
             except: pass
@@ -191,26 +193,26 @@ with st.sidebar:
     st.header("Panel de Control")
     uploaded_file = st.file_uploader("Actualizar Manual (PDF)", type="pdf")
     if uploaded_file and st.button("Procesar y Actualizar"):
-        with st.status("Iniciando actualizacion...", expanded=True) as status:
-            status.write("Descargando version actual...")
+        with st.status("Procesando...", expanded=True) as status:
+            status.write("Descargando base actual...")
             df_actual = obtener_csv_actual_github(REPO)
-            status.write("Leyendo PDF y generando sinonimos...")
+            status.write("Analizando PDF...")
             df_nuevo, cant, msg = procesar_pdf_completo(uploaded_file, df_actual)
             if df_nuevo is not None and cant > 0:
-                status.write(f"Subiendo {cant} registros a GitHub...")
+                status.write(f"Guardando {cant} registros...")
                 ok, gh_msg = subir_csv_a_github(df_nuevo, REPO)
                 if ok:
                     df_nuevo.to_csv(FILE_PATH, index=False)
-                    status.update(label="Exito", state="complete", expanded=False)
-                    st.success(f"Base actualizada con {len(df_nuevo)} registros.")
-                    st.warning("Recarga la pagina para usar los nuevos datos.")
+                    status.update(label="Listo", state="complete", expanded=False)
+                    st.success("Base actualizada.")
+                    st.warning("Recarga la pagina.")
                 else:
-                    status.update(label="Error GitHub", state="error"); st.error(f"Error: {gh_msg}")
+                    status.update(label="Error", state="error"); st.error(f"Error GitHub: {gh_msg}")
             else:
-                status.update(label="Error Lectura", state="error"); st.error(f"Error: {msg}")
+                status.update(label="Error", state="error"); st.error(f"Error: {msg}")
 
 st.title("BarisBot soporte interno")
-if not collection: st.warning("Base vacia. Sube el PDF."); st.stop()
+if not collection: st.warning("Esperando base de datos..."); st.stop()
 
 if "messages" not in st.session_state: st.session_state.messages = []
 for m in st.session_state.messages:
@@ -221,6 +223,7 @@ if prompt := st.chat_input("Escribe tu consulta..."):
     with st.chat_message("user"): st.markdown(prompt)
     with st.chat_message("assistant"):
         
+        # Logica de memoria corta para preguntas tipo "y el video?"
         query_busqueda = prompt
         if len(prompt.split()) < 4 and len(st.session_state.messages) > 1:
             ultimo_user = [m['content'] for m in st.session_state.messages if m['role'] == 'user'][-2]
@@ -228,6 +231,7 @@ if prompt := st.chat_input("Escribe tu consulta..."):
         
         contexto, fuentes = "", []
         
+        # 1. Busqueda Vectorial
         try:
             res = collection.query(query_texts=[query_busqueda], n_results=3)
             if res['documents']:
@@ -237,6 +241,7 @@ if prompt := st.chat_input("Escribe tu consulta..."):
                     fuentes.append({"p": meta['p'], "r": r_bonita, "v": meta['v']})
         except: pass
         
+        # 2. Busqueda Keyword
         palabras = prompt.lower().split()
         if len(palabras) > 2:
             for _, row in df_global.iterrows():
@@ -247,7 +252,7 @@ if prompt := st.chat_input("Escribe tu consulta..."):
                     fuentes.append({"p": row['Pregunta_Hibrida'], "r": r_bonita, "v": row['Video']})
         
         if not fuentes:
-            resp_final = "No encontre informacion especifica en el manual sobre eso."
+            resp_final = "No encontre informacion especifica en el manual."
         else:
             client = None
             try: 
@@ -256,32 +261,48 @@ if prompt := st.chat_input("Escribe tu consulta..."):
             
             resp_ia = None
             if client:
+                # Prompt estricto pero permisivo con el formato
                 prompt_ia = f"""
-                Eres un asistente de soporte Baris.
-                CONTEXTO DEL MANUAL:
+                Eres un asistente de soporte.
+                CONTEXTO:
                 {contexto}
                 PREGUNTA: {prompt}
                 
                 REGLAS:
-                1. Responde SOLO con la informacion del CONTEXTO.
-                2. Si no responde a la pregunta, dilo claramente.
-                3. NO INVENTES.
-                4. Usa formato de lista si hay pasos.
+                1. Responde basandote SOLAMENTE en el CONTEXTO.
+                2. Usa listas si hay pasos.
+                3. Si el contexto no es claro, di "NO_DATA".
                 """
                 resp_ia = consultar_ia_blindada(client, prompt_ia)
             
-            videos_encontrados = ""
+            # --- LOGICA DE FALLBACK (LA SOLUCION A TU PROBLEMA) ---
+            
+            # 1. Recolectar videos siempre
+            videos_str = ""
             for f in fuentes:
                 if f['v'] and len(f['v']) > 10:
-                    videos_encontrados += f"\n\n**Video Tutorial:** {f['v']}"
+                    videos_str += f"\n\n**Video Tutorial:** {f['v']}"
             
+            # 2. Decidir si usamos IA o Texto Crudo
+            # Si la IA dice "Lo siento" o "NO_DATA", usamos el texto crudo.
+            frases_rechazo = ["lo siento", "no tengo informacion", "no_data", "no aparece", "no se menciona"]
+            
+            usar_ia = False
             if resp_ia:
-                resp_final = resp_ia + videos_encontrados
+                usar_ia = True
+                for rechazo in frases_rechazo:
+                    if rechazo in resp_ia.lower():
+                        usar_ia = False
+                        break
+            
+            if usar_ia:
+                resp_final = resp_ia + videos_str
             else:
-                resp_final = "**Resultados del Manual:**\n\n"
+                # Fallback: Mostrar lo que encontro la base de datos sin filtrar
+                resp_final = "**Informacion del Manual (Texto Original):**\n\n"
                 for f in fuentes:
                     resp_final += f"### {f['p']}\n{f['r']}\n\n"
-                resp_final += videos_encontrados
+                resp_final += videos_str
 
         st.markdown(resp_final)
         st.session_state.messages.append({"role": "assistant", "content": resp_final})
