@@ -12,9 +12,9 @@ import shutil
 import re
 
 # --- CONFIGURACION DE LA PAGINA ---
-st.set_page_config(page_title="Soporte Baris", layout="wide")
+st.set_page_config(page_title="BarisBot soporte interno", layout="wide")
 
-# --- FUNCION DE RESPALDO (IA BLINDADA) ---
+# --- FUNCION DE RESPALDO  ---
 def consultar_ia_blindada(cliente_groq, prompt, max_tokens=500):
     """
     Intenta con varios modelos para asegurar la respuesta.
@@ -81,7 +81,7 @@ def procesar_pdf_reporte_limpio(file_obj, df_actual):
     try:
         with pdfplumber.open(file_obj) as pdf:
             for page in pdf.pages:
-                # Usamos extract_text simple para capturar el flujo crudo (con comillas)
+                # Usamos extract_text simple para capturar el flujo crudo (con comillas y comas)
                 texto_pag = page.extract_text() 
                 if texto_pag:
                     buffer_texto_completo += texto_pag + "\n"
@@ -95,6 +95,7 @@ def procesar_pdf_reporte_limpio(file_obj, df_actual):
     bloque_actual_id = None
     bloque_actual_texto = ""
     
+    # ELEMENTOS VISUALES DE PROGRESO
     progress_bar = st.progress(0)
     status_text = st.empty()
     total_lineas = len(lineas)
@@ -118,7 +119,9 @@ def procesar_pdf_reporte_limpio(file_obj, df_actual):
         if es_nuevo_registro:
             # -- PROCESAR EL BLOQUE ANTERIOR --
             if bloque_actual_id:
-                guardar_bloque(bloque_actual_id, bloque_actual_texto, ids_existentes, datos_finales, client, status_text)
+                # Actualizamos el texto en pantalla para ver qué hace
+                status_text.text(f"Procesando ID: {bloque_actual_id}...")
+                guardar_bloque(bloque_actual_id, bloque_actual_texto, ids_existentes, datos_finales, client)
             
             # Iniciar nuevo bloque
             bloque_actual_id = match_id.group(1)
@@ -132,16 +135,19 @@ def procesar_pdf_reporte_limpio(file_obj, df_actual):
                 linea_limpia = re.sub(r'^,+', '', linea_raw)
                 bloque_actual_texto += " " + linea_limpia
 
-        if i % 100 == 0: progress_bar.progress(min(i / total_lineas, 1.0))
+        # Actualizar barra cada 20 lineas
+        if i % 20 == 0: progress_bar.progress(min(i / total_lineas, 1.0))
 
     # Procesar el último bloque pendiente
     if bloque_actual_id:
-        guardar_bloque(bloque_actual_id, bloque_actual_texto, ids_existentes, datos_finales, client, status_text)
+        status_text.text(f"Finalizando ID: {bloque_actual_id}...")
+        guardar_bloque(bloque_actual_id, bloque_actual_texto, ids_existentes, datos_finales, client)
 
     progress_bar.progress(1.0)
+    status_text.empty()
     
-    # DEBUG INFO
-    st.info(f"Registros leídos del PDF: {registros_encontrados}")
+    # DEBUG INFO VISUAL
+    st.sidebar.info(f"✅ Registros leídos del PDF: {registros_encontrados}")
     
     # Crear DataFrame
     df_nuevo = pd.DataFrame(datos_finales, columns=["ID", "Pregunta_Hibrida", "Respuesta", "Video"])
@@ -152,18 +158,19 @@ def procesar_pdf_reporte_limpio(file_obj, df_actual):
     df_nuevo.to_csv(csv_buffer, index=False)
     
     cont_real = len(df_nuevo) - len(ids_existentes)
+    # Si la base estaba vacía, todos son nuevos
     if len(ids_existentes) == 0: cont_real = len(df_nuevo)
+    
+    st.sidebar.info(f"🚀 Registros NUEVOS a guardar: {cont_real}")
 
     return csv_buffer.getvalue(), df_nuevo, cont_real
 
-def guardar_bloque(id_nota, texto, ids_existentes, datos_finales, client, status_text):
+def guardar_bloque(id_nota, texto, ids_existentes, datos_finales, client):
     """Limpia el texto sucio tipo CSV y separa pregunta/respuesta"""
     
     # Si ya existe, IGNORAR (Logica Incremental)
     if str(id_nota) in ids_existentes:
         return
-
-    # status_text.text(f"Procesando ID Nuevo: {id_nota}...")
 
     # 1. Limpieza masiva de caracteres basura del CSV
     # Reemplazamos comillas dobles y comas residuales
@@ -211,7 +218,7 @@ def guardar_bloque(id_nota, texto, ids_existentes, datos_finales, client, status
             sinonimos = consultar_ia_blindada(client, prompt, max_tokens=40)
             if sinonimos:
                 preg_hibrida = f"{pregunta} ({sinonimos})"
-                time.sleep(0.5) # Pausa de seguridad
+                time.sleep(0.1) # Pausa muy breve para velocidad
         except:
             pass 
 
@@ -244,8 +251,8 @@ def actualizar_github(content, repo_name):
 # --- BARRA LATERAL ---
 with st.sidebar:
     st.header("Panel de Control")
-    st.info("Sistema listo para archivo JHF (FRX)")
-    uploaded = st.file_uploader("Sube el PDF Limpio", type="pdf")
+    st.info("Sistema listo para archivo PDF (FRX)")
+    uploaded = st.file_uploader("Sube el PDF", type="pdf")
     
     if uploaded and st.button("Actualizar Base"):
         REPO = "Vld439/BarisBot" 
@@ -254,6 +261,7 @@ with st.sidebar:
             df_actual = obtener_csv_actual_github(REPO)
             
             status.write("Analizando PDF y consultando IA...")
+            # Aquí llamamos a la función que ahora tiene LOGS VISUALES
             csv_str, df_final, cont = procesar_pdf_reporte_limpio(uploaded, df_actual)
             
             if len(df_final) > 0:
@@ -269,7 +277,7 @@ with st.sidebar:
                 st.error("Error: No se generaron registros validos.")
 
 # --- CHATBOT ---
-st.title("Soporte Baris (Base Limpia)")
+st.title("BarisBot soporte interno")
 
 @st.cache_resource
 def load_db():
